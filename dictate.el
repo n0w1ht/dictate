@@ -1,7 +1,7 @@
 ;;; dictate.el --- Offline voice dictation with whisper.cpp -*- lexical-binding: t; -*-
 
 ;; Author: n0w1ht
-;; Version: 0.2.1
+;; Version: 0.2.2
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: convenience, multimedia
 ;; URL: https://github.com/n0w1ht/dictate
@@ -18,7 +18,7 @@
 ;;   C-u C-c v    the same, but ask for the spoken language first
 ;;   M-x dictate-cancel              stop without transcribing
 ;;   M-x dictate-setup               download whisper.cpp and a model
-;;   M-x dictate-select-microphone   pick the microphone (Windows)
+;;   M-x dictate-select-microphone   pick the microphone
 ;;   M-x dictate-check               show what is installed and found
 ;;
 ;; Spoken commands: "new line", "new paragraph", "delete that",
@@ -88,6 +88,13 @@ an AVFoundation audio index (nil means \"0\")."
 When nil, they are built from `system-type' and `dictate-microphone'.
 For example (\"-f\" \"dshow\" \"-i\" \"audio=Microphone Array\")."
   :type '(repeat string))
+
+(defcustom dictate-audio-filter "highpass=f=100"
+  "An ffmpeg audio filter applied to the microphone, or nil for none.
+The default cuts the low rumble (fans, hum, a laptop's own vibration)
+below 100 Hz, which is not speech but drowns it out and keeps pauses
+from being heard."
+  :type '(choice (const :tag "None" nil) string))
 
 (defcustom dictate-language "en"
   "Spoken language, as a two letter code, or \"auto\" to detect it.
@@ -352,16 +359,44 @@ Each device is (NAME . ALTERNATIVE-NAME); the second may be nil."
             (setq last nil))))))
     (nreverse devices)))
 
+(defun dictate--parse-pulse-sources (text)
+  "Return the microphones in TEXT, the output of \"pactl list sources\".
+Each is (DESCRIPTION . NAME); monitors of speakers are left out."
+  (let ((sources nil) (name nil))
+    (dolist (line (split-string text "\n"))
+      (cond
+       ((string-match "^[ \t]*Name: \\(.*\\)" line)
+        (setq name (string-trim (match-string 1 line))))
+       ((and name (string-match "^[ \t]*Description: \\(.*\\)" line))
+        (unless (string-suffix-p ".monitor" name)
+          (push (cons (string-trim (match-string 1 line)) name) sources))
+        (setq name nil))))
+    (nreverse sources)))
+
 (defun dictate--list-microphones ()
-  "Return the microphones ffmpeg can see, as (NAME . ALTERNATIVE-NAME)."
-  (unless (eq system-type 'windows-nt)
-    (user-error "Dictate: listing microphones is only done on Windows; set `dictate-microphone'"))
-  (dictate--parse-dshow-devices
-   (with-temp-buffer
-     (let ((coding-system-for-read 'utf-8))
-       (call-process (dictate--ffmpeg) nil t nil "-hide_banner"
-                     "-list_devices" "true" "-f" "dshow" "-i" "dummy"))
-     (buffer-string))))
+  "Return the microphones that can be recorded from, as (NAME . ARGUMENT).
+On Windows these are DirectShow devices, where ARGUMENT is the
+alternative name; on GNU/Linux PulseAudio (or PipeWire) sources, where
+ARGUMENT is the source name."
+  (pcase system-type
+    ('windows-nt
+     (dictate--parse-dshow-devices
+      (with-temp-buffer
+        (let ((coding-system-for-read 'utf-8))
+          (call-process (dictate--ffmpeg) nil t nil "-hide_banner"
+                        "-list_devices" "true" "-f" "dshow" "-i" "dummy"))
+        (buffer-string))))
+    ('darwin
+     (user-error "Dictate: set `dictate-microphone' to an AVFoundation audio index"))
+    (_
+     (unless (executable-find "pactl")
+       (user-error "Dictate: pactl not found; set `dictate-microphone' to a PulseAudio source"))
+     (dictate--parse-pulse-sources
+      (with-temp-buffer
+        (let ((coding-system-for-read 'utf-8)
+              (process-environment (cons "LC_ALL=C" process-environment)))
+          (call-process "pactl" nil t nil "list" "sources"))
+        (buffer-string))))))
 
 (defun dictate--device-argument (device)
   "Return the name to give ffmpeg for DEVICE, a (NAME . ALTERNATIVE-NAME).
@@ -381,7 +416,9 @@ Use \\[customize-variable] `dictate-microphone' to keep the choice."
                       (user-error "Dictate: ffmpeg found no microphone")))
          (name (completing-read "Microphone: " (mapcar #'car devices) nil t)))
     (setq dictate-microphone
-          (dictate--device-argument (assoc name devices)))
+          (if (eq system-type 'windows-nt)
+              (dictate--device-argument (assoc name devices))
+            (cdr (assoc name devices))))
     (message "Dictate: using %s (add (setq dictate-microphone %S) to your init file to keep it)"
              name dictate-microphone)))
 
@@ -461,7 +498,11 @@ Use \\[customize-variable] `dictate-microphone' to keep the choice."
                                   "-nostats")
                             input
                             (list "-t" (number-to-string dictate-max-seconds)
-                                  "-ac" "1" "-ar" "16000" "-f" "s16le" "-"))
+                                  "-ac" "1" "-ar" "16000")
+                            (when (and dictate-audio-filter
+                                       (not (string-empty-p dictate-audio-filter)))
+                              (list "-af" dictate-audio-filter))
+                            (list "-f" "s16le" "-"))
            :connection-type 'pipe
            :coding 'no-conversion
            :noquery t
