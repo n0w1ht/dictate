@@ -1,7 +1,7 @@
 ;;; dictate.el --- Offline voice dictation with whisper.cpp -*- lexical-binding: t; -*-
 
 ;; Author: n0w1ht
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: convenience, multimedia
 ;; URL: https://github.com/n0w1ht/dictate
@@ -20,6 +20,9 @@
 ;;   M-x dictate-setup               download whisper.cpp and a model
 ;;   M-x dictate-select-microphone   pick the microphone (Windows)
 ;;   M-x dictate-check               show what is installed and found
+;;
+;; Spoken commands: "new line", "new paragraph", "delete that",
+;; "stop dictating", and punctuation words; see `dictate-commands'.
 ;;
 ;; Set `dictate-live' to nil to have everything typed at once after you
 ;; stop instead.
@@ -172,6 +175,33 @@ The default -sns stops whisper writing sounds such as (music)."
   "Where `dictate-setup' downloads models; %s is the model name."
   :type 'string)
 
+(defcustom dictate-commands
+  '(("new line" "\n" t)
+    ("new paragraph" "\n\n" t)
+    ("delete that" dictate-delete-last)
+    ("scratch that" dictate-delete-last)
+    ("undo" dictate-delete-last)
+    ("stop dictating" dictate-stop-dictating)
+    ("comma" ",")
+    ("period" ".")
+    ("full stop" ".")
+    ("question mark" "?")
+    ("exclamation mark" "!")
+    ("colon" ":")
+    ("semicolon" ";"))
+  "Spoken commands, as (WORDS ACTION ANYWHERE).
+WORDS are what you say, in any case; whisper may also write them run
+together (\"newline\").  ACTION is a string to type, or a function
+called with point where dictation types; it may insert text there.
+A command is only taken as one when it is said on its own, between
+pauses, unless ANYWHERE is non-nil: then it also works in the middle
+of a phrase (\"stroke volume new line cardiac output\").  Keep ANYWHERE
+for words you would never dictate as text."
+  :type '(repeat (list (string :tag "Words")
+                       (choice (string :tag "Type")
+                               (function :tag "Call"))
+                       (boolean :tag "Also inside a phrase"))))
+
 (defcustom dictate-after-insert-hook nil
   "Hook run after dictated text is inserted.
 Each function gets the start and end of the inserted text, and runs in
@@ -195,6 +225,12 @@ the buffer where it was inserted."
   "Models offered by `dictate-setup', with a short description.")
 
 ;;;; State
+
+(defvar dictate--command-session nil
+  "The session whose spoken command is being carried out.")
+
+(defvar dictate--last-session nil
+  "The most recent dictation, for `dictate-delete-last'.")
 
 (defvar dictate--recording nil
   "The `dictate--session' that is recording, or nil.")
@@ -383,13 +419,19 @@ Use \\[customize-variable] `dictate-microphone' to keep the choice."
   (speech 0)        ; frames in the current phrase that were loud enough
   (silence 0)       ; quiet frames since the last loud one
   preroll           ; quiet frames before the phrase, newest first
+  levels            ; levels of recent frames, newest first
+  (levels-count 0)  ; length of levels
   floor             ; estimate of the background noise level
+  since             ; every frame since the last phrase sent, newest first
+  (since-count 0)   ; length of since
+  sent              ; non-nil once a phrase was sent to whisper
   (level 0)         ; level of the last frame
   queue             ; WAV files waiting to be transcribed, oldest first
   busy              ; non-nil while whisper runs
   last-text         ; text of the last phrase, a hint for the next one
   period            ; position of the full stop ending the last phrase
-  copied)           ; non-nil once text went to the kill ring
+  copied            ; non-nil once text went to the kill ring
+  history)          ; (START . END) markers of what was typed, newest first
 
 (defun dictate--temp-file (suffix)
   "Return a new temporary file name ending in SUFFIX."
@@ -422,7 +464,8 @@ Use \\[customize-variable] `dictate-microphone' to keep the choice."
            :sentinel (lambda (process _event)
                        (unless (process-live-p process)
                          (dictate--recording-ended session process)))))
-    (setq dictate--recording session)
+    (setq dictate--recording session
+          dictate--last-session session)
     (dictate--update-mode-line)
     (message "Dictate: speak now%s; %s stops"
              (if dictate-live ", the text comes after each pause" "")
@@ -478,18 +521,50 @@ With CANCEL, throw away what was not typed yet."
   (max dictate-live-min-level
        (* dictate-live-sensitivity (or (dictate--session-floor session) 0))))
 
+(defconst dictate--noise-window 5
+  "Seconds of recent sound used to estimate the background noise.")
+
+(defconst dictate--noise-percentile 0.2
+  "Fraction of recent frames assumed to be background noise or quieter.")
+
+(defun dictate--update-floor (session level)
+  "Add LEVEL to SESSION's recent levels and re-estimate the noise floor.
+The floor is a low percentile of the last few seconds, not the
+quietest frame, so hiss that rises and falls is not taken for speech
+each time it rises."
+  (let ((max (* dictate--noise-window dictate--frames-per-second))
+        (count (1+ (dictate--session-levels-count session))))
+    (push level (dictate--session-levels session))
+    (when (> count (+ max 25))
+      (setf (dictate--session-levels session)
+            (seq-take (dictate--session-levels session) max))
+      (setq count max))
+    (setf (dictate--session-levels-count session) count)
+    ;; Sorting a few hundred numbers is cheap, but there is no need to
+    ;; do it for every frame once the estimate has settled.
+    (when (or (< count 50) (= (% count 10) 0))
+      (let ((sorted (sort (copy-sequence (dictate--session-levels session)) #'<)))
+        (setf (dictate--session-floor session)
+              (float (nth (floor (* dictate--noise-percentile (1- count)))
+                          sorted)))))))
+
 (defun dictate--frame (session frame)
   "Add FRAME to SESSION, ending the phrase after a long enough pause."
-  (let* ((level (dictate--frame-level frame))
-         (floor (dictate--session-floor session))
+  (dictate--update-floor session (dictate--frame-level frame))
+  (let* ((level (car (dictate--session-levels session)))
          (speech (> level (dictate--threshold session)))
          (in-phrase (dictate--session-frames session)))
-    ;; The noise floor follows quiet stretches down at once, and drifts
-    ;; up slowly, so a noisy room is learnt within a few seconds.
-    (setf (dictate--session-floor session)
-          (cond ((or (null floor) (< level floor)) (float level))
-                (t (+ floor (* 0.002 (- level floor))))))
     (setf (dictate--session-level session) level)
+    ;; Keep everything since the last phrase, in case no pause is ever
+    ;; heard; see `dictate--recording-ended'.
+    (push frame (dictate--session-since session))
+    (when (> (cl-incf (dictate--session-since-count session))
+             (+ 50 (* dictate--frames-per-second dictate-live-max-phrase)))
+      (setf (dictate--session-since session)
+            (seq-take (dictate--session-since session)
+                      (* dictate--frames-per-second dictate-live-max-phrase))
+            (dictate--session-since-count session)
+            (* dictate--frames-per-second dictate-live-max-phrase)))
     (cond
      (in-phrase
       (push frame (dictate--session-frames session))
@@ -536,6 +611,9 @@ With CANCEL, throw away what was not typed yet."
     (when (and frames
                (>= speech (* dictate-live-min-speech
                              dictate--frames-per-second)))
+      (setf (dictate--session-sent session) t
+            (dictate--session-since session) nil
+            (dictate--session-since-count session) 0)
       (dictate--enqueue session (apply #'concat (nreverse frames))))))
 
 (defun dictate--recording-ended (session process)
@@ -548,7 +626,15 @@ With CANCEL, throw away what was not typed yet."
     (setf (dictate--session-queue session) nil)
     (message "Dictate: cancelled"))
    ((dictate--session-live session)
-    (dictate--end-phrase session))
+    (dictate--end-phrase session)
+    ;; Nothing was ever taken for speech (a very quiet voice, or noise
+    ;; louder than speech): send what was recorded, rather than nothing.
+    (unless (or (dictate--session-sent session)
+                (< (dictate--session-since-count session)
+                   dictate--frames-per-second))
+      (setf (dictate--session-sent session) t)
+      (dictate--enqueue session (apply #'concat (nreverse (dictate--session-since session))))
+      (setf (dictate--session-since session) nil)))
    (t
     (let ((data (apply #'concat (nreverse (dictate--session-chunks session)))))
       (setf (dictate--session-chunks session) nil)
@@ -733,25 +819,72 @@ See `dictate--fit'."
 
 (defun dictate--insert (text session)
   "Insert TEXT at SESSION's marker, which then moves past it.
+Spoken commands in TEXT (see `dictate-commands') are carried out.
 When the buffer cannot be changed, TEXT goes to the kill ring."
+  (cond
+   ((null text))                        ; whisper failed and said so
+   ((string-empty-p text)
+    (unless (dictate--session-live session)
+      (message "Dictate: heard nothing")))
+   (t
+    (dolist (item (dictate--parse-commands text))
+      (if (stringp item)
+          (dictate--insert-text item session)
+        (dictate--run-command (cdr item) session))))))
+
+(defun dictate--read-only-p (session)
+  "Return non-nil when SESSION's text cannot go into its buffer."
+  (let ((buffer (marker-buffer (dictate--session-marker session))))
+    (or (not (buffer-live-p buffer))
+        (buffer-local-value 'buffer-read-only buffer))))
+
+(defun dictate--copy (string session)
+  "Add STRING to the kill ring entry SESSION is building."
+  (if (dictate--session-copied session)
+      (kill-append string nil)
+    (kill-new (string-trim-left string))
+    (setf (dictate--session-copied session) t))
+  (message "Dictate: copied, paste with C-y: %s" (current-kill 0 t)))
+
+(defun dictate--put (string session)
+  "Insert STRING as it is at SESSION's marker, and move the marker past it.
+Point, in the buffer and in its windows, follows when it was at the
+marker.  The inserted text is remembered for `dictate-delete-last'."
   (let* ((marker (dictate--session-marker session))
-         (buffer (marker-buffer marker))
-         (case-fold-search nil))
-    (cond
-     ((null text))                      ; whisper failed and said so
-     ((string-empty-p text)
-      (unless (dictate--session-live session)
-        (message "Dictate: heard nothing")))
-     ((or (not (buffer-live-p buffer))
-          (buffer-local-value 'buffer-read-only buffer))
-      (if (dictate--session-copied session)
-          (kill-append (concat " " text) nil)
-        (kill-new text)
-        (setf (dictate--session-copied session) t))
-      (setf (dictate--session-last-text session) text)
-      (message "Dictate: copied, paste with C-y: %s" (current-kill 0 t)))
-     (t
-      (with-current-buffer buffer
+         (buffer (marker-buffer marker)))
+    (with-current-buffer buffer
+      (let ((windows (seq-filter (lambda (w) (= (window-point w) marker))
+                                 (get-buffer-window-list buffer nil t)))
+            (at-point (= (point) marker))
+            start end)
+        (save-excursion
+          (goto-char marker)
+          (setq start (point))
+          (insert string)
+          (setq end (point)))
+        (when at-point (goto-char end))
+        (dolist (w windows) (set-window-point w end))
+        (set-marker marker end)
+        (push (cons (copy-marker start) (copy-marker end))
+              (dictate--session-history session))
+        (when (> (length (dictate--session-history session)) 50)
+          (setf (dictate--session-history session)
+                (seq-take (dictate--session-history session) 50)))
+        (cons start end)))))
+
+(defun dictate--insert-text (text session)
+  "Insert the dictated TEXT at SESSION's marker, fitted to its surroundings."
+  (if (dictate--read-only-p session)
+      (progn
+        (dictate--copy (if (and (dictate--session-copied session)
+                                (string-suffix-p "\n" (current-kill 0 t)))
+                           text
+                         (concat " " text))
+                       session)
+        (setf (dictate--session-last-text session) text))
+    (let ((marker (dictate--session-marker session))
+          (case-fold-search nil))
+      (with-current-buffer (marker-buffer marker)
         ;; The last phrase ended with a full stop, but this one goes on
         ;; with the same sentence: take the full stop back.
         (when (and (dictate--session-period session)
@@ -761,28 +894,128 @@ When the buffer cannot be changed, TEXT goes to the kill ring."
           (save-excursion
             (goto-char marker)
             (delete-char -1)))
-        (let* ((context (dictate--context marker))
-               (s (if dictate-smart-spacing
-                      (apply #'dictate--fit text context)
+        ;; A new line starts with a capital.
+        (when (and dictate-smart-spacing
+                   (save-excursion (goto-char marker) (bolp))
+                   (string-match-p "\\`[[:lower:]]" text))
+          (setq text (concat (upcase (substring text 0 1)) (substring text 1))))
+        (let* ((s (if dictate-smart-spacing
+                      (apply #'dictate--fit text (dictate--context marker))
                     text))
-               (windows (seq-filter (lambda (w) (= (window-point w) marker))
-                                    (get-buffer-window-list buffer nil t)))
-               (at-point (= (point) marker))
-               start end)
-          (save-excursion
-            (goto-char marker)
-            (setq start (point))
-            (insert s)
-            (setq end (point)))
-          (when at-point (goto-char end))
-          (dolist (w windows) (set-window-point w end))
-          (set-marker marker end)
+               (region (dictate--put s session)))
           (setf (dictate--session-period session)
-                (and (eq (char-before end) ?.) end)
+                (and (eq (char-before (cdr region)) ?.) (cdr region))
                 (dictate--session-last-text session) (string-trim s))
-          (run-hook-with-args 'dictate-after-insert-hook start end)
+          (run-hook-with-args 'dictate-after-insert-hook
+                              (car region) (cdr region))
           (unless (dictate--session-live session)
-            (message "Dictate: %s" (string-trim s)))))))))
+            (message "Dictate: %s" (string-trim s))))))))
+
+;;;; Spoken commands
+
+(defun dictate--command-regexp (words)
+  "Return a regexp matching the spoken WORDS.
+The words may also be run together or joined by a hyphen, as whisper
+sometimes writes them (newline, new-line)."
+  (concat "\\b" (mapconcat #'regexp-quote (split-string words) "[- ]?") "\\b"))
+
+(defun dictate--parse-commands (text)
+  "Split TEXT into strings to type and (command . ACTION) items.
+A phrase that is nothing but a command is that command.  Commands
+marked to work anywhere are also found inside phrases."
+  (let ((case-fold-search t)
+        (whole (seq-find
+                (lambda (c)
+                  (string-match-p
+                   (concat "\\`[[:space:][:punct:]]*"
+                           (dictate--command-regexp (car c))
+                           "[[:space:][:punct:]]*\\'")
+                   text))
+                dictate-commands)))
+    (if whole
+        (list (cons 'command (nth 1 whole)))
+      (let ((items nil) (pos 0) (done nil))
+        (while (not done)
+          (let ((best nil) (best-start nil) (best-end nil))
+            (dolist (c dictate-commands)
+              (when (and (nth 2 c)
+                         (string-match
+                          (concat "[,;]?[ \t]*" (dictate--command-regexp (car c))
+                                  "[.,!?;:]*[ \t]*")
+                          text pos)
+                         (or (null best-start) (< (match-beginning 0) best-start)))
+                (setq best c
+                      best-start (match-beginning 0)
+                      best-end (match-end 0))))
+            (if (not best)
+                (setq done t)
+              (let ((before (string-trim (substring text pos best-start))))
+                (unless (string-empty-p before) (push before items)))
+              (push (cons 'command (nth 1 best)) items)
+              (setq pos best-end))))
+        (let ((rest (string-trim (substring text pos))))
+          (unless (string-empty-p rest) (push rest items)))
+        (nreverse items)))))
+
+(defun dictate--run-command (action session)
+  "Carry out the spoken command ACTION for SESSION.
+A string is typed as it is: punctuation goes right after the last
+word.  A function is called with point where dictation types."
+  (cond
+   ((stringp action)
+    (if (dictate--read-only-p session)
+        (dictate--copy action session)
+      (let ((marker (dictate--session-marker session)))
+        (with-current-buffer (marker-buffer marker)
+          ;; Punctuation hugs the word before it.
+          (unless (string-prefix-p "\n" action)
+            (save-excursion
+              (goto-char marker)
+              (let ((end (point)))
+                (skip-chars-backward " \t")
+                (delete-region (point) end))))
+          (dictate--put action session)
+          (setf (dictate--session-period session) nil)))))
+   ((functionp action)
+    (let ((dictate--command-session session)
+          (marker (dictate--session-marker session)))
+      (if (dictate--read-only-p session)
+          (funcall action)
+        (with-current-buffer (marker-buffer marker)
+          (let ((at-point (= (point) marker)))
+            (save-excursion
+              (goto-char marker)
+              (funcall action)
+              (when (marker-buffer marker)
+                (set-marker marker (point))))
+            (when (and at-point (marker-buffer marker))
+              (goto-char marker)))))))))
+
+(defun dictate-delete-last ()
+  "Delete the last phrase or command typed by dictation.
+Say \"delete that\" while dictating, or run it as a command; each call
+goes one phrase further back."
+  (interactive)
+  (let* ((session (or dictate--command-session dictate--last-session))
+         (last (and session (pop (dictate--session-history session)))))
+    (if (not (and last (marker-buffer (car last))))
+        (message "Dictate: nothing to delete")
+      (with-current-buffer (marker-buffer (car last))
+        (if buffer-read-only
+            (message "Dictate: the buffer is read-only")
+          (delete-region (car last) (cdr last))
+          (setf (dictate--session-period session) nil
+                (dictate--session-last-text session) nil)
+          (message "Dictate: deleted")))
+      (set-marker (car last) nil)
+      (set-marker (cdr last) nil))))
+
+(defun dictate-stop-dictating ()
+  "Stop dictating, as the spoken command \"stop dictating\" does."
+  (interactive)
+  (when (and dictate--recording
+             (not (dictate--session-stopping dictate--recording)))
+    (dictate--stop)))
 
 ;;;; Commands
 
