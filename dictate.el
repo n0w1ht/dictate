@@ -1,7 +1,7 @@
 ;;; dictate.el --- Offline voice dictation with whisper.cpp -*- lexical-binding: t; -*-
 
 ;; Author: n0w1ht
-;; Version: 0.2.0
+;; Version: 0.2.1
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: convenience, multimedia
 ;; URL: https://github.com/n0w1ht/dictate
@@ -135,6 +135,12 @@ After 80% of this, a quarter second pause is enough to end it."
 
 (defcustom dictate-live-min-speech 0.3
   "Seconds of sound a phrase needs; shorter ones (a cough) are dropped."
+  :type 'number)
+
+(defcustom dictate-live-max-gap 5
+  "Seconds of sound before a phrase that are sent to whisper with it.
+Sound between phrases that was too quiet to count as speech is sent
+with the next phrase, so soft words are not lost; this caps how much."
   :type 'number)
 
 (defcustom dictate-live-sensitivity 3.0
@@ -611,10 +617,18 @@ each time it rises."
     (when (and frames
                (>= speech (* dictate-live-min-speech
                              dictate--frames-per-second)))
-      (setf (dictate--session-sent session) t
-            (dictate--session-since session) nil
-            (dictate--session-since-count session) 0)
-      (dictate--enqueue session (apply #'concat (nreverse frames))))))
+      ;; Send everything since the last phrase, not just this phrase's
+      ;; frames: speech too quiet to count as speech (a soft word, or a
+      ;; mic so loud that its hiss raises the bar) is then never lost.
+      ;; Only a long stretch of quiet before the phrase is left out.
+      (let* ((keep (min (dictate--session-since-count session)
+                        (+ (length frames)
+                           (* dictate-live-max-gap dictate--frames-per-second))))
+             (audio (seq-take (dictate--session-since session) keep)))
+        (setf (dictate--session-sent session) t
+              (dictate--session-since session) nil
+              (dictate--session-since-count session) 0)
+        (dictate--enqueue session (apply #'concat (nreverse audio)))))))
 
 (defun dictate--recording-ended (session process)
   "Finish SESSION after ffmpeg PROCESS ended."

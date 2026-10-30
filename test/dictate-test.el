@@ -357,10 +357,24 @@ dummy: Immediate exit requested
                             (dictate-test--frames 40 1.0)
                             (dictate-test--frames 3000 2.0)))))
       (should (= (length phrases) 2))
-      ;; 0.24 s before + 1.5 + 0.4 + 1.0 + 0.7 s pause
-      (should (< 3.7 (car phrases) 3.9))
-      ;; The last phrase is still open at the end and is sent then.
-      (should (< 2.2 (cadr phrases) 2.3)))))
+      ;; 1.0 s before + 1.5 + 0.4 + 1.0 + 0.7 s pause
+      (should (< 4.5 (car phrases) 4.7))
+      ;; The rest, click included, goes with the last phrase, which is
+      ;; still open at the end and is sent then: nothing is lost.
+      (should (< 3.3 (cadr phrases) 3.5))
+      (should (< 7.9 (apply #'+ phrases) 8.1)))))
+
+(ert-deftest dictate-test-long-quiet-is-left-out ()
+  ;; Only `dictate-live-max-gap' seconds of quiet go with a phrase.
+  (let ((dictate-live-pause 0.7) (dictate-live-min-speech 0.3)
+        (dictate-live-max-phrase 25) (dictate-live-sensitivity 3.0)
+        (dictate-live-min-level 150) (dictate-live-max-gap 5))
+    (let ((phrases (dictate-test--feed
+                    (append (dictate-test--frames 40 12)
+                            (dictate-test--frames 3000 1)
+                            (dictate-test--frames 40 1)))))
+      (should (= (length phrases) 1))
+      (should (< 6.8 (car phrases) 7.0)))))
 
 (ert-deftest dictate-test-steady-sound-is-not-speech ()
   ;; A steady hum louder than the minimum (a fan) is not taken for speech.
@@ -403,7 +417,9 @@ dummy: Immediate exit requested
                             (dictate-test--frames 14000 1.5)
                             (dictate-test--hiss 1000 4000 2)))))
       (should (= (length phrases) 2))
-      (should (< (apply #'max phrases) 3)))))
+      ;; Nothing is dropped between the phrases; only the hiss after
+      ;; the last pause is left over (3 + 1.5 + 2 + 1.5 + 0.7 s).
+      (should (< 8.6 (apply #'+ phrases) 8.8)))))
 
 (ert-deftest dictate-test-stop-without-pause-sends-recording ()
   ;; If nothing was ever taken for speech, stopping still sends the
@@ -429,7 +445,7 @@ dummy: Immediate exit requested
                            (make-list 46 (append (dictate-test--frames 3000 0.2)
                                                  (dictate-test--frames 40 0.06)))))))
       (should (= (length phrases) 3))
-      (should (<= (apply #'max phrases) 5.0)))))
+      (should (<= (apply #'max phrases) 5.1)))))
 
 ;;;; Recording end to end, with ffmpeg reading a file instead of a microphone
 
