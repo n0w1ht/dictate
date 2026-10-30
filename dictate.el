@@ -1,7 +1,7 @@
 ;;; dictate.el --- Offline voice dictation with whisper.cpp -*- lexical-binding: t; -*-
 
 ;; Author: n0w1ht
-;; Version: 0.1.0
+;; Version: 0.1.1
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: convenience, multimedia
 ;; URL: https://github.com/n0w1ht/dictate
@@ -383,7 +383,12 @@ Use \\[customize-variable] `dictate-microphone' to keep the choice."
   (speech 0)        ; frames in the current phrase that were loud enough
   (silence 0)       ; quiet frames since the last loud one
   preroll           ; quiet frames before the phrase, newest first
+  levels            ; levels of recent frames, newest first
+  (levels-count 0)  ; length of levels
   floor             ; estimate of the background noise level
+  since             ; every frame since the last phrase sent, newest first
+  (since-count 0)   ; length of since
+  sent              ; non-nil once a phrase was sent to whisper
   (level 0)         ; level of the last frame
   queue             ; WAV files waiting to be transcribed, oldest first
   busy              ; non-nil while whisper runs
@@ -478,18 +483,50 @@ With CANCEL, throw away what was not typed yet."
   (max dictate-live-min-level
        (* dictate-live-sensitivity (or (dictate--session-floor session) 0))))
 
+(defconst dictate--noise-window 5
+  "Seconds of recent sound used to estimate the background noise.")
+
+(defconst dictate--noise-percentile 0.2
+  "Fraction of recent frames assumed to be background noise or quieter.")
+
+(defun dictate--update-floor (session level)
+  "Add LEVEL to SESSION's recent levels and re-estimate the noise floor.
+The floor is a low percentile of the last few seconds, not the
+quietest frame, so hiss that rises and falls is not taken for speech
+each time it rises."
+  (let ((max (* dictate--noise-window dictate--frames-per-second))
+        (count (1+ (dictate--session-levels-count session))))
+    (push level (dictate--session-levels session))
+    (when (> count (+ max 25))
+      (setf (dictate--session-levels session)
+            (seq-take (dictate--session-levels session) max))
+      (setq count max))
+    (setf (dictate--session-levels-count session) count)
+    ;; Sorting a few hundred numbers is cheap, but there is no need to
+    ;; do it for every frame once the estimate has settled.
+    (when (or (< count 50) (= (% count 10) 0))
+      (let ((sorted (sort (copy-sequence (dictate--session-levels session)) #'<)))
+        (setf (dictate--session-floor session)
+              (float (nth (floor (* dictate--noise-percentile (1- count)))
+                          sorted)))))))
+
 (defun dictate--frame (session frame)
   "Add FRAME to SESSION, ending the phrase after a long enough pause."
-  (let* ((level (dictate--frame-level frame))
-         (floor (dictate--session-floor session))
+  (dictate--update-floor session (dictate--frame-level frame))
+  (let* ((level (car (dictate--session-levels session)))
          (speech (> level (dictate--threshold session)))
          (in-phrase (dictate--session-frames session)))
-    ;; The noise floor follows quiet stretches down at once, and drifts
-    ;; up slowly, so a noisy room is learnt within a few seconds.
-    (setf (dictate--session-floor session)
-          (cond ((or (null floor) (< level floor)) (float level))
-                (t (+ floor (* 0.002 (- level floor))))))
     (setf (dictate--session-level session) level)
+    ;; Keep everything since the last phrase, in case no pause is ever
+    ;; heard; see `dictate--recording-ended'.
+    (push frame (dictate--session-since session))
+    (when (> (cl-incf (dictate--session-since-count session))
+             (+ 50 (* dictate--frames-per-second dictate-live-max-phrase)))
+      (setf (dictate--session-since session)
+            (seq-take (dictate--session-since session)
+                      (* dictate--frames-per-second dictate-live-max-phrase))
+            (dictate--session-since-count session)
+            (* dictate--frames-per-second dictate-live-max-phrase)))
     (cond
      (in-phrase
       (push frame (dictate--session-frames session))
@@ -536,6 +573,9 @@ With CANCEL, throw away what was not typed yet."
     (when (and frames
                (>= speech (* dictate-live-min-speech
                              dictate--frames-per-second)))
+      (setf (dictate--session-sent session) t
+            (dictate--session-since session) nil
+            (dictate--session-since-count session) 0)
       (dictate--enqueue session (apply #'concat (nreverse frames))))))
 
 (defun dictate--recording-ended (session process)
@@ -548,7 +588,15 @@ With CANCEL, throw away what was not typed yet."
     (setf (dictate--session-queue session) nil)
     (message "Dictate: cancelled"))
    ((dictate--session-live session)
-    (dictate--end-phrase session))
+    (dictate--end-phrase session)
+    ;; Nothing was ever taken for speech (a very quiet voice, or noise
+    ;; louder than speech): send what was recorded, rather than nothing.
+    (unless (or (dictate--session-sent session)
+                (< (dictate--session-since-count session)
+                   dictate--frames-per-second))
+      (setf (dictate--session-sent session) t)
+      (dictate--enqueue session (apply #'concat (nreverse (dictate--session-since session))))
+      (setf (dictate--session-since session) nil)))
    (t
     (let ((data (apply #'concat (nreverse (dictate--session-chunks session)))))
       (setf (dictate--session-chunks session) nil)

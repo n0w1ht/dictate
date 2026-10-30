@@ -309,6 +309,43 @@ dummy: Immediate exit requested
                                   (dictate-test--frames 4000 1.0)
                                   (dictate-test--frames 400 1.0))))))))
 
+(defun dictate-test--hiss (low high seconds)
+  "Return SECONDS of frames whose levels jump between LOW and HIGH at random."
+  (let ((frames nil))
+    (dotimes (_ (round (* seconds 50)))
+      (push (car (dictate-test--frames (+ low (random (- high low))) 0.02)) frames))
+    frames))
+
+(ert-deftest dictate-test-loud-hiss ()
+  ;; A mic turned all the way up: hiss that jumps between 1000 and 4000.
+  ;; Taking the quietest frame as the noise level made most of the hiss
+  ;; count as speech, so phrases never ended.
+  (let ((dictate-live-pause 0.7) (dictate-live-min-speech 0.3)
+        (dictate-live-max-phrase 25) (dictate-live-sensitivity 3.0)
+        (dictate-live-min-level 150))
+    (let ((phrases (dictate-test--feed
+                    (append (dictate-test--hiss 1000 4000 3)
+                            (dictate-test--frames 14000 1.5)
+                            (dictate-test--hiss 1000 4000 2)
+                            (dictate-test--frames 14000 1.5)
+                            (dictate-test--hiss 1000 4000 2)))))
+      (should (= (length phrases) 2))
+      (should (< (apply #'max phrases) 3)))))
+
+(ert-deftest dictate-test-stop-without-pause-sends-recording ()
+  ;; If nothing was ever taken for speech, stopping still sends the
+  ;; recording to whisper instead of dropping it.
+  (let ((dictate-live-min-speech 0.3) (dictate-live-max-phrase 25)
+        (dictate-live-sensitivity 3.0) (dictate-live-min-level 20000)
+        (sent nil)
+        (session (dictate--session-create :live t)))
+    (cl-letf (((symbol-function 'dictate--enqueue)
+               (lambda (_s data) (push (/ (length data) 32000.0) sent)))
+              ((symbol-function 'dictate--next) #'ignore))
+      (dolist (f (dictate-test--frames 3000 2)) (dictate--frame session f))
+      (dictate--recording-ended session nil))
+    (should (equal sent '(2.0)))))
+
 (ert-deftest dictate-test-long-phrase-is-cut ()
   (let ((dictate-live-pause 0.7) (dictate-live-min-speech 0.3)
         (dictate-live-max-phrase 5) (dictate-live-sensitivity 3.0)
