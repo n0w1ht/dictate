@@ -37,6 +37,23 @@ dummy: Immediate exit requested
                  '(("Microphone (Realtek(R) Audio)" . "@device_cm_{1}\\wave_{2}"))))
   (should (null (dictate--parse-dshow-devices "nothing here"))))
 
+(ert-deftest dictate-test-parse-pulse-sources ()
+  (should (equal (dictate--parse-pulse-sources "Source #55
+\tState: SUSPENDED
+\tName: alsa_output.pci-0000_65_00.6.analog-stereo.monitor
+\tDescription: Monitor of Family 17h/19h HD Audio Controller Speaker
+Source #56
+\tName: alsa_input.pci-0000_65_00.6.analog-stereo
+\tDescription: Family 17h/19h HD Audio Controller Digital Microphone
+Source #80
+\tName: alsa_input.usb-Shokz_Loop120-02.mono-fallback
+\tDescription: Shokz Loop120 Mono
+")
+                 '(("Family 17h/19h HD Audio Controller Digital Microphone"
+                    . "alsa_input.pci-0000_65_00.6.analog-stereo")
+                   ("Shokz Loop120 Mono"
+                    . "alsa_input.usb-Shokz_Loop120-02.mono-fallback")))))
+
 (ert-deftest dictate-test-device-argument ()
   (should (equal (dictate--device-argument '("Headset (Jabra)" . "@alt"))
                  "Headset (Jabra)"))

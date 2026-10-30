@@ -133,6 +133,7 @@ add them to `dictate-prompt`.
 | `dictate-live-sensitivity` | 3.0 | how much louder than background noise speech must be |
 | `dictate-live-min-level` | 150 | quietest sound counted as speech |
 | `dictate-live-show-level` | nil | show loudness/threshold in the mode line, for tuning |
+| `dictate-audio-filter` | `"highpass=f=100"` | ffmpeg filter on the mic; the default cuts low rumble (fans, hum) |
 | `dictate-smart-spacing` | t | fit spaces and capitals to the text around |
 | `dictate-max-seconds` | 600 | longest recording |
 | `dictate-keep-audio` | nil | keep the last recording as `.emacs.d/dictate/last.wav` |
@@ -140,6 +141,12 @@ add them to `dictate-prompt`.
 | `dictate-after-insert-hook` | nil | functions run with the start and end of the text |
 
 ## If something goes wrong
+
+- **Transcripts are poor**: use a headset or a mic close to your mouth
+  if you have one; `M-x dictate-select-microphone` picks it (on
+  GNU/Linux it lists PulseAudio/PipeWire sources). A laptop's built-in
+  mic picks up fan noise and its own vibration. Also check the input
+  level is not too high (see below).
 
 - **"nothing was recorded: ... Could not find audio only device"**: the
   microphone name is wrong. Run `M-x dictate-select-microphone`.
