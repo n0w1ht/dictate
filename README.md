@@ -74,6 +74,31 @@ typed a second or two later while you carry on talking.
   say "comma" or "full stop".
 - Recording stops on its own after 10 minutes (`dictate-max-seconds`).
 
+## Voice commands
+
+Say a command on its own, with a short pause before and after it:
+
+| Say | Does |
+|---|---|
+| new line / new paragraph | starts a new line / a new paragraph (these also work in the middle of a phrase: "stroke volume new line cardiac output") |
+| delete that / scratch that / undo | deletes the last phrase typed; say it again to go further back |
+| stop dictating | stops, like pressing `C-c v` |
+| comma, period, full stop, question mark, exclamation mark, colon, semicolon | types that mark, for when whisper leaves it out |
+
+Only "new line" and "new paragraph" are recognised inside a phrase.
+The others count only when said on their own, so "the colon absorbs
+water" is typed as it is. `M-x dictate-delete-last` does the same as
+"delete that".
+
+Add your own in `dictate-commands`. Each entry is the words, then a
+string to type or a function to call where the text goes, then t if it
+should also work inside a phrase:
+
+```elisp
+(add-to-list 'dictate-commands
+             '("new heading" (lambda () (insert "\n* "))))
+```
+
 ## Models
 
 `M-x dictate-setup` can download any of these; the newest one downloaded
@@ -110,6 +135,7 @@ add them to `dictate-prompt`.
 | `dictate-smart-spacing` | t | fit spaces and capitals to the text around |
 | `dictate-max-seconds` | 600 | longest recording |
 | `dictate-keep-audio` | nil | keep the last recording as `.emacs.d/dictate/last.wav` |
+| `dictate-commands` | see above | spoken commands |
 | `dictate-after-insert-hook` | nil | functions run with the start and end of the text |
 
 ## If something goes wrong

@@ -177,6 +177,79 @@ dummy: Immediate exit requested
     (dictate--insert nil (dictate-test--session 1))
     (should (equal (buffer-string) ""))))
 
+(ert-deftest dictate-test-parse-commands ()
+  (should (equal (dictate--parse-commands "New line.") '((command . "\n"))))
+  (should (equal (dictate--parse-commands " newline") '((command . "\n"))))
+  (should (equal (dictate--parse-commands "Delete that.")
+                 '((command . dictate-delete-last))))
+  (should (equal (dictate--parse-commands "Second point, new line, third point.")
+                 '("Second point" (command . "\n") "third point.")))
+  (should (equal (dictate--parse-commands "One new paragraph two new line three")
+                 '("One" (command . "\n\n") "two" (command . "\n") "three")))
+  ;; Only commands marked ANYWHERE are found inside a phrase.
+  (should (equal (dictate--parse-commands "The colon absorbs water.")
+                 '("The colon absorbs water.")))
+  (should (equal (dictate--parse-commands "Colon.") '((command . ":"))))
+  ;; Words that merely contain a command are left alone.
+  (should (equal (dictate--parse-commands "A pipeline renewal stays.")
+                 '("A pipeline renewal stays."))))
+
+(ert-deftest dictate-test-commands-in-buffer ()
+  (with-temp-buffer
+    (let ((session (dictate-test--session 1 :live t)))
+      (dolist (phrase '("First point." "New line." "Second point, new line, third point."
+                        "New paragraph." "the end" "Comma." "really" "Full stop."))
+        (dictate--insert phrase session))
+      (should (equal (buffer-string)
+                     "First point.\nSecond point\nThird point.\n\nThe end, really."))
+      (should (= (point) (point-max))))))
+
+(ert-deftest dictate-test-delete-that ()
+  (with-temp-buffer
+    (insert "Notes:")
+    (let ((session (dictate-test--session (point-max) :live t)))
+      (dictate--insert "The heart pumps." session)
+      (dictate--insert "Wrong words here." session)
+      (dictate--insert "Delete that." session)
+      (should (equal (buffer-string) "Notes: The heart pumps."))
+      (dictate--insert "It has four chambers." session)
+      (should (equal (buffer-string) "Notes: The heart pumps. It has four chambers."))
+      ;; Each delete goes one phrase further back.
+      (dictate--insert "Scratch that." session)
+      (dictate--insert "Undo." session)
+      (should (equal (buffer-string) "Notes:"))
+      (dictate--insert "Delete that." session)
+      (should (equal (buffer-string) "Notes:")))))
+
+(ert-deftest dictate-test-stop-dictating ()
+  (let* ((stopped nil)
+         (dictate--recording (dictate--session-create :live t)))
+    (cl-letf (((symbol-function 'dictate--stop) (lambda (&rest _) (setq stopped t))))
+      (with-temp-buffer
+        (let ((session (dictate-test--session 1 :live t)))
+          (dictate--insert "Stop dictating." session)
+          (should stopped)
+          (should (equal (buffer-string) "")))))))
+
+(ert-deftest dictate-test-own-command ()
+  (let ((dictate-commands '(("heading" (lambda () (insert "\n* "))))))
+    (with-temp-buffer
+      (insert "Text.")
+      (let ((session (dictate-test--session (point-max) :live t)))
+        (dictate--insert "Heading." session)
+        (dictate--insert "Kidney" session)
+        (should (equal (buffer-string) "Text.\n* Kidney"))))))
+
+(ert-deftest dictate-test-commands-read-only ()
+  (let ((kill-ring nil))
+    (with-temp-buffer
+      (setq buffer-read-only t)
+      (let ((session (dictate-test--session 1 :live t)))
+        (dictate--insert "One." session)
+        (dictate--insert "New line." session)
+        (dictate--insert "Two." session))
+      (should (equal (car kill-ring) "One.\nTwo.")))))
+
 (ert-deftest dictate-test-whisper-arguments ()
   (let ((dictate-model "/m/ggml-small.en.bin")
         (dictate-threads 3)
