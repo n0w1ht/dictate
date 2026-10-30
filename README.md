@@ -129,6 +129,7 @@ add them to `dictate-prompt`.
 | `dictate-live` | t | phrase by phrase; nil types everything after you stop |
 | `dictate-live-pause` | 0.7 | seconds of quiet that end a phrase |
 | `dictate-live-max-phrase` | 25 | longest phrase in seconds |
+| `dictate-live-max-gap` | 5 | seconds of quiet sound before a phrase sent with it, so soft words are never lost |
 | `dictate-live-sensitivity` | 3.0 | how much louder than background noise speech must be |
 | `dictate-live-min-level` | 150 | quietest sound counted as speech |
 | `dictate-live-show-level` | nil | show loudness/threshold in the mode line, for tuning |
