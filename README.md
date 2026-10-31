@@ -3,8 +3,9 @@
 Press `C-c v`, speak, press `C-c v` again, and the words are typed where
 the cursor was. It all runs on your own computer: ffmpeg records the
 microphone and [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
-turns the recording into text. No account, no API key, and no internet
-after the first download.
+turns the recording into text (or
+[parakeet.cpp](https://github.com/mudler/parakeet.cpp), see below). No
+account, no API key, and no internet after the first download.
 
 Unlike Windows voice typing (Win+H), it doesn't depend on Emacs
 supporting the Windows text service, so words don't get dropped. It
@@ -83,16 +84,20 @@ Say a command on its own, with a short pause before and after it:
 | new line / new paragraph | starts a new line / a new paragraph (these also work in the middle of a phrase: "stroke volume new line cardiac output") |
 | delete that / scratch that / undo | deletes the last phrase typed; say it again to go further back |
 | stop dictating | stops, like pressing `C-c v` |
-| comma, period, full stop, question mark, exclamation mark, colon, semicolon | types that mark, for when whisper leaves it out |
+| comma, period, full stop, question mark, exclamation mark | types that mark; also works as the last words of a phrase ("chest pain period") |
+| colon, semicolon | types that mark, when said on its own |
 
 Only "new line" and "new paragraph" are recognised inside a phrase.
-The others count only when said on their own, so "the colon absorbs
-water" is typed as it is. `M-x dictate-delete-last` does the same as
+Comma, period, full stop, question mark and exclamation mark also work
+at the end of a phrase, so a phrase that really ends in "time period"
+is typed as "time.". The others count only when said on their own, so
+"the colon absorbs water" is typed as it is. `M-x dictate-delete-last` does the same as
 "delete that".
 
 Add your own in `dictate-commands`. Each entry is the words, then a
 string to type or a function to call where the text goes, then t if it
-should also work inside a phrase:
+should also work inside a phrase, or `end` if it should also work as
+the last words of one:
 
 ```elisp
 (add-to-list 'dictate-commands
@@ -116,10 +121,40 @@ is used (or set `dictate-model` to a file).
 If transcribing feels slow, switch to base.en. If it misspells terms,
 add them to `dictate-prompt`.
 
+## Parakeet instead of whisper
+
+[parakeet.cpp](https://github.com/mudler/parakeet.cpp) runs NVIDIA's
+Parakeet models. Its CTC models (`ctc-0.6b`, `ctc-1.1b`) are English
+only, quick, and got every word right where whisper small.en needed a
+prompt, but they write lower case without punctuation. With
+`dictate-engine` set to `parakeet`, dictate starts each sentence and
+line with a capital, writes "i" as "I", and you say "period", "comma"
+or "question mark" at the end of a phrase.
+
+Download a release of parakeet.cpp and a `.gguf` model into
+`~/.parakeet/`, then:
+
+```elisp
+(use-package dictate
+  :bind ("C-c v" . dictate-toggle)
+  :custom
+  (dictate-engine 'parakeet)
+  ;; Both are found under ~/.parakeet/ when not set.
+  (dictate-parakeet-program "~/.parakeet/parakeet-v0.6.1-bin-linux-vulkan-x64/parakeet-cli")
+  (dictate-parakeet-model "~/.parakeet/ctc-1.1b-f16.gguf"))
+```
+
+`dictate-prompt` and `C-u C-c v` (language) don't apply to Parakeet.
+`M-x dictate-check` shows what it found.
+
 ## Settings
 
 | Variable | Default | What it does |
 |---|---|---|
+| `dictate-engine` | `whisper` | `whisper` or `parakeet` |
+| `dictate-parakeet-program` | nil | parakeet-cli; nil finds it on PATH or under `~/.parakeet/` |
+| `dictate-parakeet-model` | nil | `.gguf` model; nil uses the newest under `~/.parakeet/` |
+| `dictate-parakeet-directory` | `"~/.parakeet/"` | where the two above are looked for |
 | `dictate-language` | `"en"` | spoken language, or `"auto"` |
 | `dictate-prompt` | nil | vocabulary and style hint for whisper |
 | `dictate-microphone` | nil | microphone name; nil uses the first one |

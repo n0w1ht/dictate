@@ -169,12 +169,44 @@ Source #80
       (should (equal (dictate--session-last-text session) "Then it returns.")))))
 
 (ert-deftest dictate-test-insert-keeps-typed-full-stop ()
-  ;; A full stop the user typed is never removed.
+  ;; A full stop the user typed is never removed; a new sentence follows.
   (with-temp-buffer
     (insert "Done.")
     (let ((session (dictate-test--session (point-max) :live t)))
       (dictate--insert "and more." session)
-      (should (equal (buffer-string) "Done. and more.")))))
+      (should (equal (buffer-string) "Done. And more.")))))
+
+(ert-deftest dictate-test-insert-without-punctuation ()
+  ;; Parakeet CTC writes lower case without punctuation: "period" at
+  ;; the end of a phrase types it, and the next sentence gets a capital.
+  (with-temp-buffer
+    (let ((session (dictate-test--session 1 :live t)))
+      (dictate--insert "the patient has chest pain" session)
+      (dictate--insert "and shortness of breath period" session)
+      (dictate--insert "she is fine comma" session)
+      (dictate--insert "i think question mark" session)
+      (dictate--insert "new line" session)
+      (dictate--insert "next" session)
+      (should (equal (buffer-string)
+                     "The patient has chest pain and shortness of breath. She is fine, i think?\nNext")))))
+
+(ert-deftest dictate-test-split-end ()
+  (should (equal (dictate--parse-commands "chest pain period")
+                 '("chest pain" (command . "."))))
+  (should (equal (dictate--parse-commands "is it, question mark.")
+                 '("is it" (command . "?"))))
+  (should (equal (dictate--parse-commands "pain full stop new line next")
+                 '("pain" (command . ".") (command . "\n") "next")))
+  ;; Only at the end, and colon only on its own.
+  (should (equal (dictate--parse-commands "a period of rest")
+                 '("a period of rest")))
+  (should (equal (dictate--parse-commands "the large colon")
+                 '("the large colon"))))
+
+(ert-deftest dictate-test-tidy-lower-case ()
+  (should (equal (dictate--tidy-lower-case "so i think i'm sure i'd go in it")
+                 "so I think I'm sure I'd go in it"))
+  (should (equal (dictate--tidy-lower-case "vitamin is") "vitamin is")))
 
 (ert-deftest dictate-test-insert-read-only ()
   (let ((kill-ring nil))
@@ -309,6 +341,33 @@ Source #80
           (let ((exe (expand-file-name "whisper/Release/whisper-cli.exe" dir)))
             (write-region "" nil exe)
             (should (equal (dictate--whisper) exe))))
+      (delete-directory dir t))))
+
+(ert-deftest dictate-test-find-parakeet ()
+  (let* ((dir (make-temp-file "dictate-parakeet" t))
+         (dictate-parakeet-directory dir)
+         (dictate-parakeet-program nil)
+         (dictate-parakeet-model nil)
+         (dictate--parakeet-cache nil)
+         (dictate-engine 'parakeet)
+         (exec-path nil))
+    (unwind-protect
+        (progn
+          (should-not (dictate--engine-program t))
+          (should-error (dictate--engine-model) :type 'user-error)
+          (make-directory (expand-file-name "parakeet-v0.6.1-bin-linux-vulkan-x64" dir))
+          (let ((exe (expand-file-name
+                      "parakeet-v0.6.1-bin-linux-vulkan-x64/parakeet-cli" dir))
+                (old (expand-file-name "ctc-0.6b-f16.gguf" dir))
+                (new (expand-file-name "ctc-1.1b-f16.gguf" dir)))
+            (write-region "" nil exe)
+            (write-region "" nil old)
+            (set-file-times old (time-subtract nil 100))
+            (write-region "" nil new)
+            (should (equal (dictate--engine-program) exe))
+            (should (equal (dictate--engine-model) new))
+            (should (equal (dictate--parakeet-arguments "/t/a.wav")
+                           (list "transcribe" "--model" new "--input" "/t/a.wav")))))
       (delete-directory dir t))))
 
 (ert-deftest dictate-test-mode-line ()
@@ -574,6 +633,39 @@ Each call appends its arguments and the WAV length to DIR/calls."
           (should (= (length calls) 2))
           ;; The first phrase is given to whisper as a hint for the second.
           (should (string-match-p "--prompt The heart pumps\\." (nth 1 calls))))))))
+
+(ert-deftest dictate-test-parakeet-transcribe ()
+  ;; A fake parakeet-cli: logs on stderr, the text on stdout.
+  (let* ((dir (make-temp-file "dictate-parakeet" t))
+         (exe (expand-file-name "parakeet-cli" dir))
+         (wav (expand-file-name "a.wav" dir))
+         (dictate-engine 'parakeet)
+         (dictate-parakeet-program exe)
+         (dictate-parakeet-model (expand-file-name "ctc.gguf" dir))
+         (dictate--jobs 0)
+         (result 'none))
+    (unwind-protect
+        (progn
+          (with-temp-file exe
+            (insert "#!/bin/sh\n"
+                    "[ \"$1\" = transcribe ] || exit 2\n"
+                    "echo 'loading model on Vulkan' >&2\n"
+                    "echo 'so i said hello'\n"))
+          (set-file-modes exe #o755)
+          (write-region "" nil wav)
+          (dictate--transcribe wav "en" "ignored" (lambda (text) (setq result text)))
+          (should (dictate-test--wait (lambda () (not (eq result 'none))) 10))
+          (should (equal result "so I said hello"))
+          (should-not (file-exists-p wav))
+          ;; A failure gives nil.
+          (with-temp-file exe (insert "#!/bin/sh\necho 'no GPU' >&2\nexit 1\n"))
+          (write-region "" nil wav)
+          (setq result 'none)
+          (dictate--transcribe wav "en" nil (lambda (text) (setq result text)))
+          (should (dictate-test--wait (lambda () (not (eq result 'none))) 10))
+          (should (null result))
+          (should (= dictate--jobs 0)))
+      (delete-directory dir t))))
 
 (ert-deftest dictate-test-cancel ()
   (skip-unless (executable-find "ffmpeg"))
