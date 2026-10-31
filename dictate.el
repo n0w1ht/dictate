@@ -1,7 +1,7 @@
 ;;; dictate.el --- Offline voice dictation with whisper.cpp -*- lexical-binding: t; -*-
 
 ;; Author: n0w1ht
-;; Version: 0.2.2
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: convenience, multimedia
 ;; URL: https://github.com/n0w1ht/dictate
@@ -23,6 +23,9 @@
 ;;
 ;; Spoken commands: "new line", "new paragraph", "delete that",
 ;; "stop dictating", and punctuation words; see `dictate-commands'.
+;;
+;; Set `dictate-engine' to `parakeet' to transcribe with parakeet.cpp
+;; (NVIDIA Parakeet CTC models) instead of whisper.cpp.
 ;;
 ;; Set `dictate-live' to nil to have everything typed at once after you
 ;; stop instead.
@@ -46,6 +49,16 @@
   :group 'convenience
   :prefix "dictate-")
 
+(defcustom dictate-engine 'whisper
+  "The speech recognizer that turns recordings into text.
+`whisper' runs whisper.cpp (`dictate-whisper-program', `dictate-model').
+`parakeet' runs parakeet.cpp (`dictate-parakeet-program',
+`dictate-parakeet-model'); its CTC models are English only and write
+lower case without punctuation, so dictate capitalizes sentences and
+you say \"period\" or \"comma\" at the end of a phrase."
+  :type '(choice (const :tag "whisper.cpp" whisper)
+                 (const :tag "parakeet.cpp" parakeet)))
+
 (defcustom dictate-directory (locate-user-emacs-file "dictate/")
   "Folder where `dictate-setup' puts whisper.cpp and the models."
   :type 'directory)
@@ -60,6 +73,25 @@ When nil, look for whisper-cli on PATH, then under `dictate-directory'."
 When nil, use the newest ggml-*.bin in the models folder of
 `dictate-directory'."
   :type '(choice (const :tag "Find automatically" nil) file))
+
+(defcustom dictate-parakeet-directory "~/.parakeet/"
+  "Folder searched for parakeet-cli and models when they are not set."
+  :type 'directory)
+
+(defcustom dictate-parakeet-program nil
+  "The parakeet.cpp command line program (parakeet-cli).
+When nil, look for parakeet-cli on PATH, then under
+`dictate-parakeet-directory'."
+  :type '(choice (const :tag "Find automatically" nil) file))
+
+(defcustom dictate-parakeet-model nil
+  "The parakeet.cpp model file (*.gguf).
+When nil, use the newest .gguf file under `dictate-parakeet-directory'."
+  :type '(choice (const :tag "Find automatically" nil) file))
+
+(defcustom dictate-parakeet-extra-args nil
+  "More arguments for parakeet-cli transcribe."
+  :type '(repeat string))
 
 (defcustom dictate-ffmpeg-program "ffmpeg"
   "The ffmpeg program used to record the microphone."
@@ -195,11 +227,11 @@ The default -sns stops whisper writing sounds such as (music)."
     ("scratch that" dictate-delete-last)
     ("undo" dictate-delete-last)
     ("stop dictating" dictate-stop-dictating)
-    ("comma" ",")
-    ("period" ".")
-    ("full stop" ".")
-    ("question mark" "?")
-    ("exclamation mark" "!")
+    ("comma" "," end)
+    ("period" "." end)
+    ("full stop" "." end)
+    ("question mark" "?" end)
+    ("exclamation mark" "!" end)
     ("colon" ":")
     ("semicolon" ";"))
   "Spoken commands, as (WORDS ACTION ANYWHERE).
@@ -209,11 +241,15 @@ called with point where dictation types; it may insert text there.
 A command is only taken as one when it is said on its own, between
 pauses, unless ANYWHERE is non-nil: then it also works in the middle
 of a phrase (\"stroke volume new line cardiac output\").  Keep ANYWHERE
-for words you would never dictate as text."
+for words you would never dictate as text.  When ANYWHERE is `end', the
+command also works as the last words of a phrase (\"chest pain period\"),
+which suits punctuation when the recognizer writes none itself."
   :type '(repeat (list (string :tag "Words")
                        (choice (string :tag "Type")
                                (function :tag "Call"))
-                       (boolean :tag "Also inside a phrase"))))
+                       (choice (const :tag "Only on its own" nil)
+                               (const :tag "Also inside a phrase" t)
+                               (const :tag "Also at the end of a phrase" end)))))
 
 (defcustom dictate-after-insert-hook nil
   "Hook run after dictated text is inserted.
@@ -253,6 +289,9 @@ the buffer where it was inserted."
 
 (defvar dictate--whisper-cache nil
   "Whisper program found by `dictate--whisper', as (DIRECTORY . PROGRAM).")
+
+(defvar dictate--parakeet-cache nil
+  "Program found by `dictate--parakeet', as (DIRECTORY . PROGRAM).")
 
 (defconst dictate--mode-line '(:eval (dictate--mode-line-string))
   "Mode line construct added to `global-mode-string'.")
@@ -333,6 +372,51 @@ Signal an error when there is none, unless NOERROR."
         (car (sort files #'file-newer-than-file-p)))
       (unless noerror
         (user-error "Dictate: no model found; run M-x dictate-setup"))))
+
+(defun dictate--parakeet (&optional noerror)
+  "Return the parakeet-cli program.
+Signal an error when it cannot be found, unless NOERROR."
+  (let ((dir (expand-file-name dictate-parakeet-directory)))
+    (or (and dictate-parakeet-program
+             (or (executable-find dictate-parakeet-program)
+                 (and (file-executable-p dictate-parakeet-program)
+                      dictate-parakeet-program)))
+        (executable-find "parakeet-cli")
+        (and dictate--parakeet-cache
+             (equal (car dictate--parakeet-cache) dir)
+             (file-exists-p (cdr dictate--parakeet-cache))
+             (cdr dictate--parakeet-cache))
+        (let ((found (and (file-directory-p dir)
+                          (car (directory-files-recursively
+                                dir "\\`parakeet-cli\\(\\.exe\\)?\\'")))))
+          (when found
+            (setq dictate--parakeet-cache (cons dir found))
+            found))
+        (unless noerror
+          (user-error "Dictate: parakeet-cli not found; set `dictate-parakeet-program'")))))
+
+(defun dictate--parakeet-model (&optional noerror)
+  "Return the parakeet model file.
+Signal an error when there is none, unless NOERROR."
+  (or (and dictate-parakeet-model (expand-file-name dictate-parakeet-model))
+      (let* ((dir (expand-file-name dictate-parakeet-directory))
+             (files (and (file-directory-p dir)
+                         (directory-files-recursively dir "\\.gguf\\'"))))
+        (car (sort files #'file-newer-than-file-p)))
+      (unless noerror
+        (user-error "Dictate: no parakeet model found; set `dictate-parakeet-model'"))))
+
+(defun dictate--parakeet-p ()
+  "Return non-nil when parakeet.cpp does the transcribing."
+  (eq dictate-engine 'parakeet))
+
+(defun dictate--engine-program (&optional noerror)
+  "Return the program of `dictate-engine'; see `dictate--whisper'."
+  (if (dictate--parakeet-p) (dictate--parakeet noerror) (dictate--whisper noerror)))
+
+(defun dictate--engine-model (&optional noerror)
+  "Return the model of `dictate-engine'; see `dictate--model'."
+  (if (dictate--parakeet-p) (dictate--parakeet-model noerror) (dictate--model noerror)))
 
 ;;;; Microphones
 
@@ -483,8 +567,8 @@ Use \\[customize-variable] `dictate-microphone' to keep the choice."
 (defun dictate--start (language)
   "Start recording; the text will be in LANGUAGE."
   (let* ((ffmpeg (dictate--ffmpeg))
-         (_ (dictate--whisper))
-         (_ (dictate--model))
+         (_ (dictate--engine-program))
+         (_ (dictate--engine-model))
          (input (dictate--input-arguments))
          (log (get-buffer-create " *dictate-ffmpeg*"))
          (session (dictate--session-create
@@ -763,6 +847,12 @@ LANGUAGE is the spoken language.  HINT is text said just before."
               (list "--prompt" prompt))
             dictate-extra-args)))
 
+(defun dictate--parakeet-arguments (wav)
+  "Return the parakeet-cli arguments to transcribe WAV to stdout."
+  (append (list "transcribe" "--model" (dictate--parakeet-model)
+                "--input" wav)
+          dictate-parakeet-extra-args))
+
 (defun dictate--next (session)
   "Transcribe the next phrase queued in SESSION, if whisper is free."
   (unless (dictate--session-busy session)
@@ -783,17 +873,22 @@ LANGUAGE is the spoken language.  HINT is text said just before."
 
 (defun dictate--transcribe (wav language hint callback)
   "Turn WAV into text and call CALLBACK with it.
-LANGUAGE is the spoken language and HINT the text said before.
-CALLBACK gets nil when whisper fails."
+LANGUAGE is the spoken language and HINT the text said before; the
+parakeet engine uses neither.  CALLBACK gets nil when the program fails."
   (let* ((out (file-name-sans-extension wav))
-         (log (generate-new-buffer " *dictate-whisper*")))
+         (parakeet (dictate--parakeet-p))
+         (log (generate-new-buffer " *dictate-whisper*"))
+         (errors (and parakeet (generate-new-buffer " *dictate-parakeet-log*"))))
     (setq dictate--jobs (1+ dictate--jobs))
     (dictate--update-mode-line)
     (make-process
      :name "dictate-whisper"
      :buffer log
-     :command (cons (dictate--whisper)
-                    (dictate--whisper-arguments wav out language hint))
+     :command (if parakeet
+                  (cons (dictate--parakeet) (dictate--parakeet-arguments wav))
+                (cons (dictate--whisper)
+                      (dictate--whisper-arguments wav out language hint)))
+     :stderr errors
      :connection-type 'pipe
      :noquery t
      :sentinel
@@ -804,20 +899,32 @@ CALLBACK gets nil when whisper fails."
          (let ((txt (concat out ".txt"))
                (text nil))
            (unwind-protect
-               (if (file-exists-p txt)
-                   (setq text (with-temp-buffer
-                                (let ((coding-system-for-read 'utf-8))
-                                  (insert-file-contents txt))
-                                (dictate--clean (buffer-string))))
-                 (message "Dictate: whisper failed: %s"
-                          (with-current-buffer log
+               (cond
+                ((and parakeet (zerop (process-exit-status process)))
+                 ;; parakeet-cli prints the text on stdout, logs on stderr.
+                 (setq text (dictate--tidy-lower-case
+                             (dictate--clean
+                              (with-current-buffer log (buffer-string))))))
+                ((and (not parakeet) (file-exists-p txt))
+                 (setq text (with-temp-buffer
+                              (let ((coding-system-for-read 'utf-8))
+                                (insert-file-contents txt))
+                              (dictate--clean (buffer-string)))))
+                (t
+                 (message "Dictate: %s failed: %s"
+                          (if parakeet "parakeet" "whisper")
+                          (with-current-buffer (if (buffer-live-p errors) errors log)
                             (string-trim
                              (buffer-substring
                               (max (point-min) (- (point-max) 300))
-                              (point-max))))))
+                              (point-max)))))))
              (ignore-errors (delete-file txt))
              (ignore-errors (delete-file wav))
-             (kill-buffer log))
+             (kill-buffer log)
+             (when (buffer-live-p errors)
+               (let ((p (get-buffer-process errors)))
+                 (when p (delete-process p)))
+               (kill-buffer errors)))
            (funcall callback text)))))))
 
 (defun dictate--clean (text)
@@ -828,6 +935,12 @@ CALLBACK gets nil when whisper fails."
     (if (string-match-p "\\`\\(?:([^)]*)\\|\\*[^*]*\\*\\| \\)*\\'" s)
         ""
       s)))
+
+(defun dictate--tidy-lower-case (text)
+  "Write the pronoun i in TEXT as I, for recognizers that write no capitals."
+  (let ((case-fold-search nil))
+    (replace-regexp-in-string "\\bi\\('\\(?:m\\|ll\\|ve\\|d\\)\\)?\\b"
+                              "I\\1" text t)))
 
 (defun dictate--fit (text before after spaced &optional next)
   "Return TEXT fitted between the text before and after point.
@@ -949,9 +1062,13 @@ marker.  The inserted text is remembered for `dictate-delete-last'."
           (save-excursion
             (goto-char marker)
             (delete-char -1)))
-        ;; A new line starts with a capital.
+        ;; A new line or a new sentence starts with a capital.
         (when (and dictate-smart-spacing
-                   (save-excursion (goto-char marker) (bolp))
+                   (save-excursion
+                     (goto-char marker)
+                     (or (bolp)
+                         (progn (skip-chars-backward " \t")
+                                (memq (char-before) '(?. ?? ?!)))))
                    (string-match-p "\\`[[:lower:]]" text))
           (setq text (concat (upcase (substring text 0 1)) (substring text 1))))
         (let* ((s (if dictate-smart-spacing
@@ -993,7 +1110,7 @@ marked to work anywhere are also found inside phrases."
         (while (not done)
           (let ((best nil) (best-start nil) (best-end nil))
             (dolist (c dictate-commands)
-              (when (and (nth 2 c)
+              (when (and (eq (nth 2 c) t)
                          (string-match
                           (concat "[,;]?[ \t]*" (dictate--command-regexp (car c))
                                   "[.,!?;:]*[ \t]*")
@@ -1004,13 +1121,33 @@ marked to work anywhere are also found inside phrases."
                       best-end (match-end 0))))
             (if (not best)
                 (setq done t)
-              (let ((before (string-trim (substring text pos best-start))))
-                (unless (string-empty-p before) (push before items)))
+              (setq items (dictate--split-end
+                           (string-trim (substring text pos best-start)) items))
               (push (cons 'command (nth 1 best)) items)
               (setq pos best-end))))
-        (let ((rest (string-trim (substring text pos))))
-          (unless (string-empty-p rest) (push rest items)))
+        (setq items (dictate--split-end (string-trim (substring text pos)) items))
         (nreverse items)))))
+
+(defun dictate--split-end (text items)
+  "Push TEXT onto ITEMS, splitting off a command it ends with.
+Only commands marked `end' in `dictate-commands' are looked for.
+Return the new ITEMS, newest first."
+  (let* ((case-fold-search t)
+         (start nil)
+         (end (seq-find
+               (lambda (c)
+                 (and (eq (nth 2 c) 'end)
+                      (string-match
+                       (concat "[ \t,;]+" (dictate--command-regexp (car c))
+                               "[.,!?;:]*\\'")
+                       text)
+                      (setq start (match-beginning 0))))
+               dictate-commands)))
+    (when end
+      (setq text (string-trim (substring text 0 start))))
+    (unless (string-empty-p text) (push text items))
+    (when end (push (cons 'command (nth 1 end)) items))
+    items))
 
 (defun dictate--run-command (action session)
   "Carry out the spoken command ACTION for SESSION.
@@ -1092,7 +1229,11 @@ When `dictate-live' is non-nil, each phrase is typed after you pause."
                           (format "Language code, or auto (default %s): "
                                   dictate-language)
                           nil nil dictate-language)))
+           (when (dictate--parakeet-p)
+             (message "Dictate: the parakeet models understand English only")
+             (sit-for 1.5))
            (when (and (not (equal language "en"))
+                      (not (dictate--parakeet-p))
                       (string-match-p "\\.en\\.bin\\'" (dictate--model)))
              (message "Dictate: %s understands English only; download a model without .en"
                       (file-name-nondirectory (dictate--model)))
@@ -1149,16 +1290,20 @@ after COMMAND succeeds.  Stop with a message at the first failure."
 That is whisper.cpp (on Windows, when it is not on PATH) and MODEL,
 one of `dictate-models'.  Runs in the background."
   (interactive
-   (list (completing-read
-          "Model to download (default small.en): "
-          (lambda (string pred action)
-            (if (eq action 'metadata)
-                `(metadata
-                  (annotation-function
-                   . ,(lambda (m)
-                        (concat "  " (cdr (assoc m dictate-models))))))
-              (complete-with-action action dictate-models string pred)))
-          nil nil nil nil "small.en")))
+   (progn
+     (when (dictate--parakeet-p)
+       (user-error "Dictate: setup is for whisper.cpp; for parakeet, get parakeet-cli and a .gguf model from github.com/mudler/parakeet.cpp releases into %s"
+                   dictate-parakeet-directory))
+     (list (completing-read
+            "Model to download (default small.en): "
+            (lambda (string pred action)
+              (if (eq action 'metadata)
+                  `(metadata
+                    (annotation-function
+                     . ,(lambda (m)
+                          (concat "  " (cdr (assoc m dictate-models))))))
+		(complete-with-action action dictate-models string pred)))
+            nil nil nil nil "small.en"))))
   (unless (executable-find dictate-curl-program)
     (user-error "Dictate: curl not found"))
   (let* ((dir (file-name-as-directory (expand-file-name dictate-directory)))
@@ -1202,8 +1347,9 @@ one of `dictate-models'.  Runs in the background."
   "Show what dictation will use, and what is missing."
   (interactive)
   (let* ((ffmpeg (executable-find dictate-ffmpeg-program))
-         (whisper (dictate--whisper t))
-         (model (dictate--model t))
+         (parakeet (dictate--parakeet-p))
+         (whisper (dictate--engine-program t))
+         (model (dictate--engine-model t))
          (mics (and ffmpeg (eq system-type 'windows-nt)
                     (ignore-errors (dictate--list-microphones))))
          (ok (lambda (v) (if v "OK " "-- "))))
@@ -1214,14 +1360,20 @@ one of `dictate-models'.  Runs in the background."
         (insert (funcall ok ffmpeg) "ffmpeg: "
                 (or ffmpeg "not found; run: winget install Gyan.FFmpeg, then restart Emacs")
                 "\n")
-        (insert (funcall ok whisper) "whisper-cli: "
-                (or whisper "not found; run M-x dictate-setup") "\n")
+        (insert (funcall ok whisper)
+                (if parakeet "parakeet-cli: " "whisper-cli: ")
+                (or whisper (if parakeet
+                                "not found; set dictate-parakeet-program"
+                              "not found; run M-x dictate-setup"))
+                "\n")
         (insert (funcall ok model) "model: "
                 (if model
                     (format "%s (%d MB)" model
                             (/ (or (file-attribute-size (file-attributes model)) 0)
                                1048576))
-                  "none; run M-x dictate-setup")
+                  (if parakeet
+                      "none; set dictate-parakeet-model"
+                    "none; run M-x dictate-setup"))
                 "\n")
         (when (eq system-type 'windows-nt)
           (insert (funcall ok mics) "microphones: "
@@ -1230,9 +1382,12 @@ one of `dictate-models'.  Runs in the background."
                                     (and mics (concat (caar mics) " (first found)"))
                                     "nothing")
                   "\n"))
-        (insert "    language: " dictate-language
-                (if dictate-prompt (concat "\n    prompt: " dictate-prompt) "")
-                (format "\n    threads: %d\n" dictate-threads))
+        (if parakeet
+            (insert "    engine: parakeet (English; say \"period\" or \"comma\""
+                    " at the end of a phrase)\n")
+          (insert "    language: " dictate-language
+                  (if dictate-prompt (concat "\n    prompt: " dictate-prompt) "")
+                  (format "\n    threads: %d\n" dictate-threads)))
         (insert "\nPress " (substitute-command-keys "\\[dictate-toggle]")
                 " to start dictating and again to stop.\n")
         (special-mode))
