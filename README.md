@@ -2,46 +2,46 @@
 
 Press `C-c v`, speak, press `C-c v` again, and the words are typed where
 the cursor was. It all runs on your own computer: ffmpeg records the
-microphone and [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
-turns the recording into text (or
-[parakeet.cpp](https://github.com/mudler/parakeet.cpp), see below). No
-account, no API key, and no internet after the first download.
+microphone and [parakeet.cpp](https://github.com/mudler/parakeet.cpp),
+which runs NVIDIA's Parakeet speech models, turns the recording into
+text. No account, no API key, no internet.
 
 Unlike Windows voice typing (Win+H), it doesn't depend on Emacs
 supporting the Windows text service, so words don't get dropped. It
 works phrase by phrase: each time you pause, what you just said is
 typed a second or two later while you carry on talking.
 
-## Install on Windows
+The Parakeet CTC models (`ctc-0.6b`, `ctc-1.1b`) understand English
+only, and write lower case without punctuation. dictate starts each
+sentence and line with a capital and writes "i" as "I"; you say
+"period", "comma" or "question mark" at the end of a phrase.
 
-1. Install ffmpeg (records the microphone), then **restart Emacs** so it
-   sees the new PATH:
+## Install
 
-   ```
-   winget install Gyan.FFmpeg
-   ```
+1. Install ffmpeg, which records the microphone. On Windows run
+   `winget install Gyan.FFmpeg`, then **restart Emacs** so it sees the
+   new PATH; on GNU/Linux and macOS use your package manager.
 
-2. Let desktop apps use the microphone: Settings > Privacy & security >
-   Microphone > turn on **Let desktop apps access your microphone**.
-   Without it ffmpeg records silence.
+2. On Windows, let desktop apps use the microphone: Settings > Privacy &
+   security > Microphone > turn on **Let desktop apps access your
+   microphone**. Without it ffmpeg records silence.
 
-3. Copy `dictate.el` to `.emacs.d/lisp/` and add to your init file:
+3. Download a release of
+   [parakeet.cpp](https://github.com/mudler/parakeet.cpp/releases) for
+   your system and a `.gguf` CTC model (`ctc-1.1b-f16.gguf` is the most
+   accurate) into `~/.parakeet/`.
+
+4. Copy `dictate.el` to `.emacs.d/lisp/` and add to your init file:
 
    ```elisp
    (use-package dictate
      :load-path "lisp/"
      :bind ("C-c v" . dictate-toggle)
      :custom
-     ;; Words you often say, so whisper spells them right (optional).
-     (dictate-prompt "Medical school notes. Tachycardia, myocardial
-   infarction, glomerular filtration rate, ACE inhibitors."))
+     ;; Both are found under ~/.parakeet/ when not set.
+     (dictate-parakeet-program "~/.parakeet/parakeet-v0.6.1-bin-linux-vulkan-x64/parakeet-cli")
+     (dictate-parakeet-model "~/.parakeet/ctc-1.1b-f16.gguf"))
    ```
-
-4. Restart Emacs (or evaluate the block), then run `M-x dictate-setup`.
-   It downloads whisper.cpp from its GitHub releases and the model you
-   pick from Hugging Face into `.emacs.d/dictate/`, in the background.
-   Pick **small.en** (466 MB): it is the best fit for medical words on a
-   laptop. The mode line message says when it's done.
 
 5. Run `M-x dictate-check`. Every line should start with `OK`. If you
    have more than one microphone (laptop mic, headset), run
@@ -54,13 +54,6 @@ typed a second or two later while you carry on talking.
   **● Listening**, and **● Hearing you** while you speak. When you pause
   (0.7 seconds), that phrase is typed while you go on with the next
   one. Press `C-c v` again to stop; the last phrase is typed then.
-- Each phrase is given the one before it as context, so whisper keeps
-  the sentence going. If it put a full stop at a pause in the middle
-  of a sentence, the full stop is taken back when the next phrase
-  carries on in lower case.
-- `C-u C-c v`: ask which language you'll speak first (for example `hu`
-  or `auto`). This needs a model without `.en` in its name, such as
-  `small` or `large-v3-turbo-q5_0`; download one with `M-x dictate-setup`.
 - `M-x dictate-cancel`: stop, and throw away whatever wasn't typed yet.
 - It works in any buffer you can type in, including the minibuffer (a
   consult search, for example). In a read-only buffer (a PDF, the readq
@@ -68,11 +61,9 @@ typed a second or two later while you carry on talking.
 - You can keep working while it transcribes. The text goes where the
   cursor was when you started (each phrase after the last), even if you
   moved.
-- Text is fitted to its surroundings: a space is added where needed, and
-  when you dictate into the middle of a sentence the first word is made
-  lower case and whisper's full stop is dropped.
-- Whisper writes the punctuation itself from how you speak; you don't
-  say "comma" or "full stop".
+- Text is fitted to its surroundings: a space is added where needed, a
+  new sentence or line starts with a capital, and when you dictate into
+  the middle of a sentence the first word stays lower case.
 - Recording stops on its own after 10 minutes (`dictate-max-seconds`).
 
 ## Voice commands
@@ -104,63 +95,15 @@ the last words of one:
              '("new heading" (lambda () (insert "\n* "))))
 ```
 
-## Models
-
-`M-x dictate-setup` can download any of these; the newest one downloaded
-is used (or set `dictate-model` to a file).
-
-| Model | Size | Notes |
-|---|---|---|
-| tiny.en | 75 MB | fastest, more mistakes |
-| base.en | 142 MB | fast, good for everyday English |
-| small.en | 466 MB | recommended; good with medical words |
-| medium.en | 1.5 GB | more accurate, slow on a laptop CPU |
-| large-v3-turbo-q5_0 | 547 MB | many languages, accurate, slower |
-| base, small | 142 / 466 MB | many languages |
-
-If transcribing feels slow, switch to base.en. If it misspells terms,
-add them to `dictate-prompt`.
-
-## Parakeet instead of whisper
-
-[parakeet.cpp](https://github.com/mudler/parakeet.cpp) runs NVIDIA's
-Parakeet models. Its CTC models (`ctc-0.6b`, `ctc-1.1b`) are English
-only, quick, and got every word right where whisper small.en needed a
-prompt, but they write lower case without punctuation. With
-`dictate-engine` set to `parakeet`, dictate starts each sentence and
-line with a capital, writes "i" as "I", and you say "period", "comma"
-or "question mark" at the end of a phrase.
-
-Download a release of parakeet.cpp and a `.gguf` model into
-`~/.parakeet/`, then:
-
-```elisp
-(use-package dictate
-  :bind ("C-c v" . dictate-toggle)
-  :custom
-  (dictate-engine 'parakeet)
-  ;; Both are found under ~/.parakeet/ when not set.
-  (dictate-parakeet-program "~/.parakeet/parakeet-v0.6.1-bin-linux-vulkan-x64/parakeet-cli")
-  (dictate-parakeet-model "~/.parakeet/ctc-1.1b-f16.gguf"))
-```
-
-`dictate-prompt` and `C-u C-c v` (language) don't apply to Parakeet.
-`M-x dictate-check` shows what it found.
-
 ## Settings
 
 | Variable | Default | What it does |
 |---|---|---|
-| `dictate-engine` | `whisper` | `whisper` or `parakeet` |
 | `dictate-parakeet-program` | nil | parakeet-cli; nil finds it on PATH or under `~/.parakeet/` |
 | `dictate-parakeet-model` | nil | `.gguf` model; nil uses the newest under `~/.parakeet/` |
 | `dictate-parakeet-directory` | `"~/.parakeet/"` | where the two above are looked for |
-| `dictate-language` | `"en"` | spoken language, or `"auto"` |
-| `dictate-prompt` | nil | vocabulary and style hint for whisper |
+| `dictate-parakeet-extra-args` | nil | more arguments for `parakeet-cli transcribe` |
 | `dictate-microphone` | nil | microphone name; nil uses the first one |
-| `dictate-model` | nil | model file; nil uses the newest download |
-| `dictate-whisper-program` | nil | whisper-cli; nil finds it |
-| `dictate-threads` | CPU cores, up to 8 | CPU threads for whisper |
 | `dictate-live` | t | phrase by phrase; nil types everything after you stop |
 | `dictate-live-pause` | 0.7 | seconds of quiet that end a phrase |
 | `dictate-live-max-phrase` | 25 | longest phrase in seconds |
@@ -171,7 +114,7 @@ Download a release of parakeet.cpp and a `.gguf` model into
 | `dictate-audio-filter` | `"highpass=f=100"` | ffmpeg filter on the mic; the default cuts low rumble (fans, hum) |
 | `dictate-smart-spacing` | t | fit spaces and capitals to the text around |
 | `dictate-max-seconds` | 600 | longest recording |
-| `dictate-keep-audio` | nil | keep the last recording as `.emacs.d/dictate/last.wav` |
+| `dictate-keep-audio` | nil | keep the last recording as `last.wav` in `dictate-directory` (`.emacs.d/dictate/`) |
 | `dictate-commands` | see above | spoken commands |
 | `dictate-after-insert-hook` | nil | functions run with the start and end of the text |
 
@@ -182,11 +125,10 @@ Download a release of parakeet.cpp and a `.gguf` model into
   GNU/Linux it lists PulseAudio/PipeWire sources). A laptop's built-in
   mic picks up fan noise and its own vibration. Also check the input
   level is not too high (see below).
-
 - **"nothing was recorded: ... Could not find audio only device"**: the
   microphone name is wrong. Run `M-x dictate-select-microphone`.
-- **"heard nothing"** every time: check the microphone permission in
-  step 2, and that the right microphone is picked. Set
+- **"heard nothing"** every time: check the microphone permission
+  (Windows, step 2), and that the right microphone is picked. Set
   `dictate-keep-audio` to t and play `.emacs.d/dictate/last.wav` to hear
   what was recorded.
 - **Phrases never end, or end in the middle of words**: turn on
@@ -196,25 +138,12 @@ Download a release of parakeet.cpp and a `.gguf` model into
   raise `dictate-live-sensitivity` or `dictate-live-min-level`; if quiet
   speech is missed, lower them. If you pause a lot mid-sentence, raise
   `dictate-live-pause` to 1.0.
-- **Each phrase takes a while to appear**: whisper loads the model for
-  every phrase, which costs about a second with small.en. Use base.en
-  for a snappier feel.
-- **"Thank you." appears when you said nothing**: whisper does this on
-  silence. Stop sooner after you finish speaking.
-- **dictate-setup fails while downloading**: download by hand instead.
-  Get `whisper-bin-x64.zip` from the
-  [whisper.cpp releases](https://github.com/ggml-org/whisper.cpp/releases/latest)
-  and unzip it into `.emacs.d/dictate/whisper/`; get
-  `ggml-small.en.bin` from
-  [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/tree/main)
-  into `.emacs.d/dictate/models/`.
+- **"parakeet failed: ..."**: the message ends with what parakeet-cli
+  said. Run `M-x dictate-check` to see which program and model are used.
 
-## On GNU/Linux and macOS
-
-Install ffmpeg and whisper.cpp with your package manager (or build
-whisper.cpp), then run `M-x dictate-setup` for the model. Recording uses
-PulseAudio on GNU/Linux and AVFoundation on macOS; set
-`dictate-microphone` or `dictate-input-args` to choose another input.
+Recording uses DirectShow on Windows, PulseAudio on GNU/Linux and
+AVFoundation on macOS; set `dictate-microphone` or `dictate-input-args`
+to choose another input.
 
 ## Tests
 
@@ -223,4 +152,6 @@ emacs -Q --batch -L . -l test/dictate-test.el -f ert-run-tests-batch-and-exit
 ```
 
 The recording tests need ffmpeg; they read a file instead of the
-microphone and use a fake whisper-cli.
+microphone and use a fake parakeet-cli. To use the real one, set
+`DICTATE_TEST_PARAKEET` and `DICTATE_TEST_MODEL`, and `DICTATE_TEST_WAV`
+to a recording of speech.

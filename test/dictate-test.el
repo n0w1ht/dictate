@@ -2,7 +2,7 @@
 
 ;; Run: emacs -Q --batch -L . -l test/dictate-test.el -f ert-run-tests-batch-and-exit
 ;; The recording tests need ffmpeg; set DICTATE_TEST_WAV to a speech WAV,
-;; and DICTATE_TEST_WHISPER / DICTATE_TEST_MODEL to run real whisper-cli.
+;; and DICTATE_TEST_PARAKEET / DICTATE_TEST_MODEL to run real parakeet-cli.
 
 ;;; Code:
 
@@ -105,7 +105,7 @@ Source #80
                  "The drug (an ACE inhibitor) works.")))
 
 (ert-deftest dictate-test-fit ()
-  ;; Start of a line: as whisper wrote it.
+  ;; Start of a line: as it was recognized.
   (should (equal (dictate--fit "The heart." nil nil t) "The heart."))
   ;; After a full stop and a space.
   (should (equal (dictate--fit "The heart." ?. nil t) "The heart."))
@@ -154,7 +154,7 @@ Source #80
       (should (= (point) (point-max))))))
 
 (ert-deftest dictate-test-insert-phrases ()
-  ;; Phrases follow each other; a full stop whisper put at a pause is
+  ;; Phrases follow each other; a full stop that ended a phrase is
   ;; taken back when the next phrase carries on the sentence.
   (with-temp-buffer
     (insert "Notes: ")
@@ -165,8 +165,7 @@ Source #80
       (dictate--insert "Then it returns." session)
       (should (equal (buffer-string)
                      "Notes: The heart pumps blood to the lungs. Then it returns."))
-      (should (= (point) (point-max)))
-      (should (equal (dictate--session-last-text session) "Then it returns.")))))
+      (should (= (point) (point-max))))))
 
 (ert-deftest dictate-test-insert-keeps-typed-full-stop ()
   ;; A full stop the user typed is never removed; a new sentence follows.
@@ -299,62 +298,17 @@ Source #80
         (dictate--insert "Two." session))
       (should (equal (car kill-ring) "One.\nTwo.")))))
 
-(ert-deftest dictate-test-whisper-arguments ()
-  (let ((dictate-model "/m/ggml-small.en.bin")
-        (dictate-threads 3)
-        (dictate-prompt "Tachycardia.")
-        (dictate-extra-args '("-sns")))
-    (should (equal (dictate--whisper-arguments "/t/a.wav" "/t/a" "en")
-                   '("-m" "/m/ggml-small.en.bin" "-f" "/t/a.wav" "-l" "en"
-                     "-t" "3" "-nt" "-np" "-otxt" "-of" "/t/a"
-                     "--prompt" "Tachycardia." "-sns"))))
-  (let ((dictate-model "/m/x.bin") (dictate-prompt "") (dictate-extra-args nil)
-        (dictate-threads 1))
-    (should-not (member "--prompt" (dictate--whisper-arguments "a" "b" "en"))))
-  ;; The last phrase is passed on as a hint.
-  (let ((dictate-model "/m/x.bin") (dictate-prompt "Cardiology.")
-        (dictate-extra-args nil) (dictate-threads 1))
-    (should (equal (member "--prompt" (dictate--whisper-arguments
-                                       "a" "b" "en" "The heart pumps."))
-                   '("--prompt" "Cardiology. The heart pumps.")))))
-
-(ert-deftest dictate-test-find-model-and-whisper ()
-  (let* ((dir (make-temp-file "dictate-dir" t))
-         (dictate-directory dir)
-         (dictate-model nil)
-         (dictate-whisper-program nil)
-         (dictate--whisper-cache nil)
-         (exec-path nil))
-    (unwind-protect
-        (progn
-          (should-not (dictate--model t))
-          (should-not (dictate--whisper t))
-          (should-error (dictate--model) :type 'user-error)
-          (make-directory (expand-file-name "models" dir))
-          (make-directory (expand-file-name "whisper/Release" dir) t)
-          (let ((old (expand-file-name "models/ggml-base.en.bin" dir))
-                (new (expand-file-name "models/ggml-small.en.bin" dir)))
-            (write-region "" nil old)
-            (set-file-times old (time-subtract nil 100))
-            (write-region "" nil new)
-            (should (equal (dictate--model) new)))
-          (let ((exe (expand-file-name "whisper/Release/whisper-cli.exe" dir)))
-            (write-region "" nil exe)
-            (should (equal (dictate--whisper) exe))))
-      (delete-directory dir t))))
-
 (ert-deftest dictate-test-find-parakeet ()
   (let* ((dir (make-temp-file "dictate-parakeet" t))
          (dictate-parakeet-directory dir)
          (dictate-parakeet-program nil)
          (dictate-parakeet-model nil)
          (dictate--parakeet-cache nil)
-         (dictate-engine 'parakeet)
          (exec-path nil))
     (unwind-protect
         (progn
-          (should-not (dictate--engine-program t))
-          (should-error (dictate--engine-model) :type 'user-error)
+          (should-not (dictate--parakeet t))
+          (should-error (dictate--parakeet-model) :type 'user-error)
           (make-directory (expand-file-name "parakeet-v0.6.1-bin-linux-vulkan-x64" dir))
           (let ((exe (expand-file-name
                       "parakeet-v0.6.1-bin-linux-vulkan-x64/parakeet-cli" dir))
@@ -364,8 +318,8 @@ Source #80
             (write-region "" nil old)
             (set-file-times old (time-subtract nil 100))
             (write-region "" nil new)
-            (should (equal (dictate--engine-program) exe))
-            (should (equal (dictate--engine-model) new))
+            (should (equal (dictate--parakeet) exe))
+            (should (equal (dictate--parakeet-model) new))
             (should (equal (dictate--parakeet-arguments "/t/a.wav")
                            (list "transcribe" "--model" new "--input" "/t/a.wav")))))
       (delete-directory dir t))))
@@ -499,7 +453,7 @@ Source #80
 
 (ert-deftest dictate-test-stop-without-pause-sends-recording ()
   ;; If nothing was ever taken for speech, stopping still sends the
-  ;; recording to whisper instead of dropping it.
+  ;; recording for transcription instead of dropping it.
   (let ((dictate-live-min-speech 0.3) (dictate-live-max-phrase 25)
         (dictate-live-sensitivity 3.0) (dictate-live-min-level 20000)
         (sent nil)
@@ -532,27 +486,28 @@ Source #80
       (accept-process-output nil 0.1))
     (funcall pred)))
 
-(defun dictate-test--fake-whisper (dir text)
-  "Write a fake whisper-cli in DIR that checks the WAV and writes TEXT.
-TEXT may hold several phrases separated by |; call N writes the Nth.
+(defun dictate-test--fake-parakeet (dir text)
+  "Write a fake parakeet-cli in DIR that checks the WAV and prints TEXT.
+TEXT may hold several phrases separated by |; call N prints the Nth.
 Each call appends its arguments and the WAV length to DIR/calls."
-  (let ((f (expand-file-name "whisper-cli" dir)))
+  (let ((f (expand-file-name "parakeet-cli" dir)))
     (with-temp-file f
       (insert "#!/bin/sh\n"
               "dir=" (shell-quote-argument dir) "\n"
               "args=\"$*\"\n"
-              "while [ $# -gt 0 ]; do case \"$1\" in -of) of=\"$2\"; shift;; -f) wav=\"$2\"; shift;; esac; shift; done\n"
+              "while [ $# -gt 0 ]; do case \"$1\" in --input) wav=\"$2\"; shift;; esac; shift; done\n"
               "len=$(ffprobe -v error -show_entries format=duration -of csv=p=0 \"$wav\") || exit 3\n"
               "n=$(( $(cat \"$dir/count\" 2>/dev/null || echo 0) + 1 )); echo $n > \"$dir/count\"\n"
               "echo \"$len $args\" >> \"$dir/calls\"\n"
+              "echo 'loading model' >&2\n"
               "sleep 0.3\n"
               "printf '%s\\n' " (shell-quote-argument text)
-              " | cut -d'|' -f$n > \"$of.txt\"\n"))
+              " | cut -d'|' -f$n\n"))
     (set-file-modes f #o755)
     f))
 
 (defun dictate-test--calls (dir)
-  "Return the lines logged by the fake whisper in DIR."
+  "Return the lines logged by the fake parakeet in DIR."
   (let ((f (expand-file-name "calls" dir)))
     (and (file-exists-p f)
          (split-string (with-temp-buffer (insert-file-contents f)
@@ -560,7 +515,7 @@ Each call appends its arguments and the WAV length to DIR/calls."
                        "\n" t))))
 
 (defmacro dictate-test--with-setup (text &rest body)
-  "Run BODY with ffmpeg reading the test WAV and a fake whisper writing TEXT."
+  "Run BODY with ffmpeg reading the test WAV and a fake parakeet printing TEXT."
   (declare (indent 1))
   `(let* ((dir (make-temp-file "dictate-e2e" t))
           (wav (or (getenv "DICTATE_TEST_WAV")
@@ -569,11 +524,11 @@ Each call appends its arguments and the WAV length to DIR/calls."
                                    "-i" "sine=frequency=440:duration=8" w)
                      w)))
           (dictate-input-args (list "-re" "-i" wav))
-          (dictate-whisper-program (or (getenv "DICTATE_TEST_WHISPER")
-                                       (dictate-test--fake-whisper dir ,text)))
-          (dictate-model (or (getenv "DICTATE_TEST_MODEL")
-                             (let ((m (expand-file-name "ggml-test.bin" dir)))
-                               (write-region "" nil m) m)))
+          (dictate-parakeet-program (or (getenv "DICTATE_TEST_PARAKEET")
+                                        (dictate-test--fake-parakeet dir ,text)))
+          (dictate-parakeet-model (or (getenv "DICTATE_TEST_MODEL")
+                                      (let ((m (expand-file-name "test.gguf" dir)))
+                                        (write-region "" nil m) m)))
           (dictate-keep-audio nil)
           (dictate-live nil)
           (dictate--recording nil)
@@ -596,8 +551,8 @@ Each call appends its arguments and the WAV length to DIR/calls."
         (should (= (process-exit-status process) 0)))
       (should (dictate-test--wait (lambda () (> (buffer-size) 8)) 60))
       (should (dictate-test--wait (lambda () (= dictate--jobs 0)) 10))
-      (if (getenv "DICTATE_TEST_WHISPER")
-          (message "Real whisper wrote: %S" (buffer-string))
+      (if (getenv "DICTATE_TEST_PARAKEET")
+          (message "Real parakeet wrote: %S" (buffer-string))
         (should (equal (buffer-string) "Notes: The kidney filters blood."))))))
 
 (ert-deftest dictate-test-live-phrases ()
@@ -629,17 +584,13 @@ Each call appends its arguments and the WAV length to DIR/calls."
                  (lambda () (string-match-p "lungs" (buffer-string))) 10))
         (should (equal (buffer-string) "Notes: The heart pumps blood to the lungs."))
         (should (= (point) (point-max)))
-        (let ((calls (dictate-test--calls dir)))
-          (should (= (length calls) 2))
-          ;; The first phrase is given to whisper as a hint for the second.
-          (should (string-match-p "--prompt The heart pumps\\." (nth 1 calls))))))))
+        (should (= (length (dictate-test--calls dir)) 2))))))
 
 (ert-deftest dictate-test-parakeet-transcribe ()
   ;; A fake parakeet-cli: logs on stderr, the text on stdout.
   (let* ((dir (make-temp-file "dictate-parakeet" t))
          (exe (expand-file-name "parakeet-cli" dir))
          (wav (expand-file-name "a.wav" dir))
-         (dictate-engine 'parakeet)
          (dictate-parakeet-program exe)
          (dictate-parakeet-model (expand-file-name "ctc.gguf" dir))
          (dictate--jobs 0)
@@ -653,7 +604,7 @@ Each call appends its arguments and the WAV length to DIR/calls."
                     "echo 'so i said hello'\n"))
           (set-file-modes exe #o755)
           (write-region "" nil wav)
-          (dictate--transcribe wav "en" "ignored" (lambda (text) (setq result text)))
+          (dictate--transcribe wav (lambda (text) (setq result text)))
           (should (dictate-test--wait (lambda () (not (eq result 'none))) 10))
           (should (equal result "so I said hello"))
           (should-not (file-exists-p wav))
@@ -661,7 +612,7 @@ Each call appends its arguments and the WAV length to DIR/calls."
           (with-temp-file exe (insert "#!/bin/sh\necho 'no GPU' >&2\nexit 1\n"))
           (write-region "" nil wav)
           (setq result 'none)
-          (dictate--transcribe wav "en" nil (lambda (text) (setq result text)))
+          (dictate--transcribe wav (lambda (text) (setq result text)))
           (should (dictate-test--wait (lambda () (not (eq result 'none))) 10))
           (should (null result))
           (should (= dictate--jobs 0)))
@@ -692,24 +643,6 @@ Each call appends its arguments and the WAV length to DIR/calls."
           (accept-process-output nil 0.2)
           (should (null dictate--recording))
           (should (= dictate--jobs 0)))))))
-
-(ert-deftest dictate-test-setup-download ()
-  (skip-unless (and (executable-find "curl") (executable-find "ffmpeg")))
-  (let* ((dir (make-temp-file "dictate-setup" t))
-         (src (expand-file-name "ggml-tiny.en.bin" dir))
-         (dictate-directory (expand-file-name "home/" dir))
-         (dictate-model nil)
-         (dictate-whisper-program (dictate-test--fake-whisper dir "x"))
-         (dictate-model-url-format (concat "file://" dir "/ggml-%s.bin")))
-    (unwind-protect
-        (progn
-          (write-region "model" nil src)
-          (dictate-setup "tiny.en")
-          (should (dictate-test--wait
-                   (lambda () (dictate--model t)) 10))
-          (should (string-suffix-p "models/ggml-tiny.en.bin" (dictate--model)))
-          (should-not (file-exists-p (concat (dictate--model) ".part"))))
-      (delete-directory dir t))))
 
 (provide 'dictate-test)
 ;;; dictate-test.el ends here
