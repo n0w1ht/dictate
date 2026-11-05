@@ -2,48 +2,54 @@
 
 Press `C-c v`, speak, press `C-c v` again, and the words are typed where
 the cursor was. It all runs on your own computer: ffmpeg records the
-microphone and [parakeet.cpp](https://github.com/mudler/parakeet.cpp),
-which runs NVIDIA's Parakeet speech models, turns the recording into
-text. No account, no API key, no internet.
+microphone and [NeMo-Speech](https://github.com/NVIDIA/NeMo-Speech.cpp)
+turns each phrase into text with the
+[Orukeet](https://huggingface.co/oruk/orukeet) model. No account, no
+API key, no internet.
 
-Unlike Windows voice typing (Win+H), it doesn't depend on Emacs
-supporting the Windows text service, so words don't get dropped. It
-works phrase by phrase: each time you pause, what you just said is
-typed a second or two later while you carry on talking.
+It works phrase by phrase: each time you pause, what you just said is
+typed half a second or so later while you carry on talking.
 
-The Parakeet CTC models (`ctc-0.6b`, `ctc-1.1b`) understand English
-only, and write lower case without punctuation. dictate starts each
-sentence and line with a capital and writes "i" as "I"; you say
-"period", "comma" or "question mark" at the end of a phrase.
+Orukeet writes capitals and punctuation itself and knows 25 European
+languages (English by default, see `dictate-language`). Because it
+hears one phrase at a time, it ends every phrase with a full stop;
+dictate takes that back when the next phrase follows a short pause, so
+a sentence you pause in the middle of stays one sentence. Pause a little
+longer (1.5 seconds) between sentences, or say "period".
 
 ## Install
 
-1. Install ffmpeg, which records the microphone. On Windows run
-   `winget install Gyan.FFmpeg`, then **restart Emacs** so it sees the
-   new PATH; on GNU/Linux and macOS use your package manager.
+1. Install ffmpeg, which records the microphone, with your package
+   manager. On Windows run `winget install Gyan.FFmpeg`, then **restart
+   Emacs** so it sees the new PATH.
 
 2. On Windows, let desktop apps use the microphone: Settings > Privacy &
    security > Microphone > turn on **Let desktop apps access your
    microphone**. Without it ffmpeg records silence.
 
 3. Download a release of
-   [parakeet.cpp](https://github.com/mudler/parakeet.cpp/releases) for
-   your system and a `.gguf` CTC model (`ctc-1.1b-f16.gguf` is the most
-   accurate) into `~/.parakeet/`.
+   [NeMo-Speech](https://github.com/NVIDIA/NeMo-Speech.cpp/releases) for
+   your system (the `vulkan` build uses the graphics card on most
+   machines; `cpu` works everywhere) and unpack it into `~/.nemo-speech/`.
 
-4. Copy `dictate.el` to `.emacs.d/lisp/` and add to your init file:
+4. Download `orukeet-v0.1.0-f16.gguf` from
+   [oruk/orukeet](https://huggingface.co/oruk/orukeet/tree/main) into
+   `~/.nemo-speech/models/`. Use this "native" GGUF, not the
+   `transcribe-cpp` one, which is for a different program.
+
+5. Copy `dictate.el` to `.emacs.d/lisp/` and add to your init file:
 
    ```elisp
    (use-package dictate
      :load-path "lisp/"
      :bind ("C-c v" . dictate-toggle)
      :custom
-     ;; Both are found under ~/.parakeet/ when not set.
-     (dictate-parakeet-program "~/.parakeet/parakeet-v0.6.1-bin-linux-vulkan-x64/parakeet-cli")
-     (dictate-parakeet-model "~/.parakeet/ctc-1.1b-f16.gguf"))
+     ;; Both are found under ~/.nemo-speech/ when not set.
+     (dictate-program "~/.nemo-speech/nemo-speech-0.3.0-linux-x86_64-vulkan/bin/nemo-speech")
+     (dictate-model "~/.nemo-speech/models/orukeet-v0.1.0-f16.gguf"))
    ```
 
-5. Run `M-x dictate-check`. Every line should start with `OK`. If you
+6. Run `M-x dictate-check`. Every line should start with `OK`. If you
    have more than one microphone (laptop mic, headset), run
    `M-x dictate-select-microphone` and pick one; to keep the choice, add
    the line it shows to your init file.
@@ -66,6 +72,80 @@ sentence and line with a capital and writes "i" as "I"; you say
   the middle of a sentence the first word stays lower case.
 - Recording stops on its own after 10 minutes (`dictate-max-seconds`).
 
+### Sentences and pauses
+
+| You say | You get |
+|---|---|
+| "the patient reports chest pain" (short pause) "and shortness of breath" | The patient reports chest pain and shortness of breath. |
+| "she is stable" (1.5 s or more) "plan is discharge" | She is stable. Plan is discharge. |
+| "she is stable period" (short pause) "plan is discharge" | She is stable. Plan is discharge. |
+
+When phrases are joined, the first word of the second is written in
+lower case, unless it is "I" or an acronym like ECG. A name at the
+start of a joined phrase ("…seen by" pause "Smith") loses its capital
+too; pause longer or fix it by hand. Set `dictate-sentence-pause` to nil
+to keep every full stop the model writes.
+
+If you would rather punctuate everything yourself, set
+`dictate-punctuation` to `spoken`: the model then writes lower case
+without punctuation, and only the marks you say are typed.
+
+### Fixing what it gets wrong
+
+| Command | Does |
+|---|---|
+| `M-x dictate-correct` | put point on a misheard word (or select a phrase), type what you meant: it is fixed there and in everything you dictate from now on |
+| `M-x dictate-replay` | hear the phrase at point again (or the last one); run it again to stop |
+| `M-x dictate-retranscribe` | transcribe the phrase at point again and replace its text, e.g. after adding a word to `dictate-vocabulary`; with `C-u`, say which language it was in |
+| `M-x dictate-switch-language` | dictate the next phrases in the next language of `dictate-languages`; with `C-u`, pick any |
+
+Corrections learnt with `dictate-correct` are kept in
+`.emacs.d/dictate/corrections.eld`. They match whole words in any case,
+and a correction to nothing drops a word, which is handy for "um". You
+can also set them yourself:
+
+```elisp
+(setq dictate-corrections '(("troponine" . "troponin")
+                            ("tug a" . "toggle")))
+```
+
+Corrections fix the text after the fact. To help the recognizer hear a
+word right in the first place, add drug names, eponyms and
+abbreviations to `dictate-vocabulary`:
+
+```elisp
+(setq dictate-vocabulary '("troponin" "Takotsubo" "apixaban"))
+```
+
+Replay and retranscribe need the audio, so the last 20 phrases are kept
+(`dictate-recent-phrases`) in a temporary folder only you can read,
+which is deleted when Emacs exits. If you dictate patient details, keep
+that in mind; set `dictate-recent-phrases` to 0 to keep none.
+
+### Several languages
+
+Each phrase is transcribed on its own, so you can switch language in
+the middle of a dictation and the next phrase is heard in the new one:
+
+```elisp
+(setq dictate-languages '("en" "fr"))
+;; Switch by voice too: say "switch language" on its own.
+(add-to-list 'dictate-commands '("switch language" dictate-switch-language))
+```
+
+The mode line then shows the language while you dictate.
+
+### Your own steps
+
+`dictate-text-functions` run on each phrase after the corrections and
+before spoken commands. Each gets the text and returns the text to
+type, or nil to drop the phrase:
+
+```elisp
+(add-hook 'dictate-text-functions
+          (lambda (text) (replace-regexp-in-string "\\bmilligrams\\b" "mg" text)))
+```
+
 ## Voice commands
 
 Say a command on its own, with a short pause before and after it:
@@ -78,12 +158,16 @@ Say a command on its own, with a short pause before and after it:
 | comma, period, full stop, question mark, exclamation mark | types that mark; also works as the last words of a phrase ("chest pain period") |
 | colon, semicolon | types that mark, when said on its own |
 
+A spoken mark replaces the one the model put at the end of the phrase,
+so "chest pain period" gives one full stop, and "heart rate" (pause)
+"comma" gives "heart rate,". A full stop you said is never taken back.
+
 Only "new line" and "new paragraph" are recognised inside a phrase.
 Comma, period, full stop, question mark and exclamation mark also work
 at the end of a phrase, so a phrase that really ends in "time period"
 is typed as "time.". The others count only when said on their own, so
-"the colon absorbs water" is typed as it is. `M-x dictate-delete-last` does the same as
-"delete that".
+"the colon absorbs water" is typed as it is. `M-x dictate-delete-last`
+does the same as "delete that".
 
 Add your own in `dictate-commands`. Each entry is the words, then a
 string to type or a function to call where the text goes, then t if it
@@ -99,11 +183,22 @@ the last words of one:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `dictate-parakeet-program` | nil | parakeet-cli; nil finds it on PATH or under `~/.parakeet/` |
-| `dictate-parakeet-model` | nil | `.gguf` model; nil uses the newest under `~/.parakeet/` |
-| `dictate-parakeet-directory` | `"~/.parakeet/"` | where the two above are looked for |
-| `dictate-parakeet-extra-args` | nil | more arguments for `parakeet-cli transcribe` |
-| `dictate-microphone` | nil | microphone name; nil uses the first one |
+| `dictate-program` | nil | nemo-speech; nil finds it on PATH or under `~/.nemo-speech/` (newest release) |
+| `dictate-model` | nil | `.gguf` model; nil uses the newest in `~/.nemo-speech/models/` |
+| `dictate-nemo-directory` | `"~/.nemo-speech/"` | where the two above are looked for |
+| `dictate-language` | `"en"` | language code; nil lets the model guess (poorly, on short phrases) |
+| `dictate-punctuation` | `model` | `model` punctuates for you; `spoken` types only the marks you say |
+| `dictate-sentence-pause` | 1.5 | seconds of pause that end a sentence; shorter pauses join phrases; nil never joins |
+| `dictate-vocabulary` | nil | words the recognizer should favour |
+| `dictate-corrections` | nil | (HEARD . MEANT) pairs fixed in every phrase, besides those learnt by `dictate-correct` |
+| `dictate-corrections-file` | `.emacs.d/dictate/corrections.eld` | where `dictate-correct` keeps what it learns |
+| `dictate-text-functions` | nil | functions that change each phrase before it is typed |
+| `dictate-recent-phrases` | 20 | phrases whose audio is kept for replay and retranscribe; 0 keeps none |
+| `dictate-play-program` | `"ffplay"` | plays a phrase (`dictate-play-args` are its arguments) |
+| `dictate-languages` | `("en")` | languages `dictate-switch-language` goes through |
+| `dictate-device` | nil | `"cpu"`, `"vulkan"`, `"cuda"`, `"metal"`; nil picks the graphics card when it can |
+| `dictate-extra-args` | nil | more arguments for `nemo-speech transcribe` |
+| `dictate-microphone` | nil | microphone name; nil uses the default |
 | `dictate-live` | t | phrase by phrase; nil types everything after you stop |
 | `dictate-live-pause` | 0.7 | seconds of quiet that end a phrase |
 | `dictate-live-max-phrase` | 25 | longest phrase in seconds |
@@ -123,8 +218,11 @@ the last words of one:
 - **Transcripts are poor**: use a headset or a mic close to your mouth
   if you have one; `M-x dictate-select-microphone` picks it (on
   GNU/Linux it lists PulseAudio/PipeWire sources). A laptop's built-in
-  mic picks up fan noise and its own vibration. Also check the input
-  level is not too high (see below).
+  mic picks up fan noise and its own vibration.
+- **Text comes out in another language**: set `dictate-language`.
+- **Full stops in the middle of sentences**: you paused longer than
+  `dictate-sentence-pause`; raise it to 2.0. **Sentences run together**:
+  lower it, or say "period".
 - **"nothing was recorded: ... Could not find audio only device"**: the
   microphone name is wrong. Run `M-x dictate-select-microphone`.
 - **"heard nothing"** every time: check the microphone permission
@@ -138,10 +236,11 @@ the last words of one:
   raise `dictate-live-sensitivity` or `dictate-live-min-level`; if quiet
   speech is missed, lower them. If you pause a lot mid-sentence, raise
   `dictate-live-pause` to 1.0.
-- **"parakeet failed: ..."**: the message ends with what parakeet-cli
+- **"nemo-speech failed: ..."**: the message ends with what nemo-speech
   said. Run `M-x dictate-check` to see which program and model are used.
+  If the graphics card is the problem, set `dictate-device` to `"cpu"`.
 
-Recording uses DirectShow on Windows, PulseAudio on GNU/Linux and
+Recording uses PulseAudio on GNU/Linux, DirectShow on Windows and
 AVFoundation on macOS; set `dictate-microphone` or `dictate-input-args`
 to choose another input.
 
@@ -152,6 +251,6 @@ emacs -Q --batch -L . -l test/dictate-test.el -f ert-run-tests-batch-and-exit
 ```
 
 The recording tests need ffmpeg; they read a file instead of the
-microphone and use a fake parakeet-cli. To use the real one, set
-`DICTATE_TEST_PARAKEET` and `DICTATE_TEST_MODEL`, and `DICTATE_TEST_WAV`
+microphone and use a fake nemo-speech. To use the real one, set
+`DICTATE_TEST_NEMO` and `DICTATE_TEST_MODEL`, and `DICTATE_TEST_WAV`
 to a recording of speech.

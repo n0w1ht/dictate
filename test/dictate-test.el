@@ -2,7 +2,7 @@
 
 ;; Run: emacs -Q --batch -L . -l test/dictate-test.el -f ert-run-tests-batch-and-exit
 ;; The recording tests need ffmpeg; set DICTATE_TEST_WAV to a speech WAV,
-;; and DICTATE_TEST_PARAKEET / DICTATE_TEST_MODEL to run real parakeet-cli.
+;; and DICTATE_TEST_NEMO / DICTATE_TEST_MODEL to run the real nemo-speech.
 
 ;;; Code:
 
@@ -176,8 +176,9 @@ Source #80
       (should (equal (buffer-string) "Done. And more.")))))
 
 (ert-deftest dictate-test-insert-without-punctuation ()
-  ;; Parakeet CTC writes lower case without punctuation: "period" at
-  ;; the end of a phrase types it, and the next sentence gets a capital.
+  ;; With `spoken' punctuation the model writes lower case without
+  ;; punctuation: "period" at the end of a phrase types it, and the next
+  ;; sentence gets a capital.
   (with-temp-buffer
     (let ((session (dictate-test--session 1 :live t)))
       (dictate--insert "the patient has chest pain" session)
@@ -188,6 +189,78 @@ Source #80
       (dictate--insert "next" session)
       (should (equal (buffer-string)
                      "The patient has chest pain and shortness of breath. She is fine, i think?\nNext")))))
+
+(ert-deftest dictate-test-join-after-short-pause ()
+  ;; The model ends every phrase with a full stop and starts each with a
+  ;; capital.  After a short pause the sentence goes on; after a long
+  ;; one a new sentence starts.
+  (let ((dictate-sentence-pause 1.5))
+    (with-temp-buffer
+      (let ((session (dictate-test--session 1 :live t)))
+        (dictate--insert "The patient reports chest pain." session nil)
+        (dictate--insert "And shortness of breath since." session 0.9)
+        (dictate--insert "Yesterday." session 0.8)
+        (should (equal (buffer-string)
+                       "The patient reports chest pain and shortness of breath since yesterday."))
+        (dictate--insert "She is stable." session 2.4)
+        (should (equal (buffer-string)
+                       "The patient reports chest pain and shortness of breath since yesterday. She is stable."))
+        ;; I and acronyms keep their capitals when joined.
+        (dictate--insert "I ordered an ECG." session 0.8)
+        (dictate--insert "ECG was normal." session 0.8)
+        (should (string-suffix-p "She is stable I ordered an ECG ECG was normal."
+                                 (buffer-string)))))))
+
+(ert-deftest dictate-test-join-keeps-other-marks ()
+  ;; Only a full stop is taken back, never a question mark, and never a
+  ;; full stop that was spoken.
+  (let ((dictate-sentence-pause 1.5))
+    (with-temp-buffer
+      (let ((session (dictate-test--session 1 :live t)))
+        (dictate--insert "Is she stable?" session nil)
+        (dictate--insert "Yes." session 0.8)
+        (should (equal (buffer-string) "Is she stable? Yes."))
+        (dictate--insert "Chest pain period." session 2.0)
+        (dictate--insert "Then nothing." session 0.8)
+        (should (equal (buffer-string) "Is she stable? Yes. Chest pain. Then nothing."))))))
+
+(ert-deftest dictate-test-join-off ()
+  (let ((dictate-sentence-pause nil))
+    (with-temp-buffer
+      (let ((session (dictate-test--session 1 :live t)))
+        (dictate--insert "The heart pumps." session nil)
+        (dictate--insert "Blood." session 0.8)
+        (should (equal (buffer-string) "The heart pumps. Blood."))
+        ;; A phrase the model starts in lower case still goes on.
+        (dictate--insert "to the lungs." session 3.0)
+        (should (equal (buffer-string) "The heart pumps. Blood to the lungs."))))))
+
+(ert-deftest dictate-test-no-double-punctuation ()
+  ;; A spoken mark replaces the one the model just wrote.
+  (with-temp-buffer
+    (let ((session (dictate-test--session 1 :live t)))
+      (dictate--insert "Chest pain." session nil)
+      (dictate--insert "Period." session 0.8)
+      (should (equal (buffer-string) "Chest pain."))
+      (dictate--insert "Is she stable question mark?" session 2.0)
+      (should (equal (buffer-string) "Chest pain. Is she stable?"))
+      (dictate--insert "Heart rate." session 2.0)
+      (dictate--insert "Comma." session 0.8)
+      (dictate--insert "Blood pressure." session 0.8)
+      (should (equal (buffer-string)
+                     "Chest pain. Is she stable? Heart rate, blood pressure."))))
+  ;; A mark the user typed is left alone.
+  (with-temp-buffer
+    (insert "Typed.")
+    (let ((session (dictate-test--session (point-max) :live t)))
+      (dictate--insert "Period." session nil)
+      (should (equal (buffer-string) "Typed..")))))
+
+(ert-deftest dictate-test-new-paragraph-keeps-full-stop ()
+  (with-temp-buffer
+    (let ((session (dictate-test--session 1 :live t)))
+      (dictate--insert "The patient is stable. New paragraph. Plan is discharge." session nil)
+      (should (equal (buffer-string) "The patient is stable.\n\nPlan is discharge.")))))
 
 (ert-deftest dictate-test-split-end ()
   (should (equal (dictate--parse-commands "chest pain period")
@@ -202,10 +275,14 @@ Source #80
   (should (equal (dictate--parse-commands "the large colon")
                  '("the large colon"))))
 
-(ert-deftest dictate-test-tidy-lower-case ()
-  (should (equal (dictate--tidy-lower-case "so i think i'm sure i'd go in it")
-                 "so I think I'm sure I'd go in it"))
-  (should (equal (dictate--tidy-lower-case "vitamin is") "vitamin is")))
+(ert-deftest dictate-test-clean-spoken ()
+  ;; Without the model's capitals, the pronoun i is still written I.
+  (let ((dictate-punctuation 'spoken))
+    (should (equal (dictate--clean "so i think i'm sure i'd go in it\n")
+                   "so I think I'm sure I'd go in it"))
+    (should (equal (dictate--clean "vitamin is") "vitamin is")))
+  (let ((dictate-punctuation 'model))
+    (should (equal (dictate--clean "a vitamin i think") "a vitamin i think"))))
 
 (ert-deftest dictate-test-insert-read-only ()
   (let ((kill-ring nil))
@@ -298,31 +375,60 @@ Source #80
         (dictate--insert "Two." session))
       (should (equal (car kill-ring) "One.\nTwo.")))))
 
-(ert-deftest dictate-test-find-parakeet ()
-  (let* ((dir (make-temp-file "dictate-parakeet" t))
-         (dictate-parakeet-directory dir)
-         (dictate-parakeet-program nil)
-         (dictate-parakeet-model nil)
-         (dictate--parakeet-cache nil)
+(ert-deftest dictate-test-find-program-and-model ()
+  (let* ((dir (make-temp-file "dictate-nemo" t))
+         (dictate-nemo-directory dir)
+         (dictate-program nil)
+         (dictate-model nil)
+         (dictate--program-cache nil)
          (exec-path nil))
     (unwind-protect
         (progn
-          (should-not (dictate--parakeet t))
-          (should-error (dictate--parakeet-model) :type 'user-error)
-          (make-directory (expand-file-name "parakeet-v0.6.1-bin-linux-vulkan-x64" dir))
-          (let ((exe (expand-file-name
-                      "parakeet-v0.6.1-bin-linux-vulkan-x64/parakeet-cli" dir))
-                (old (expand-file-name "ctc-0.6b-f16.gguf" dir))
-                (new (expand-file-name "ctc-1.1b-f16.gguf" dir)))
-            (write-region "" nil exe)
-            (write-region "" nil old)
-            (set-file-times old (time-subtract nil 100))
-            (write-region "" nil new)
-            (should (equal (dictate--parakeet) exe))
-            (should (equal (dictate--parakeet-model) new))
-            (should (equal (dictate--parakeet-arguments "/t/a.wav")
-                           (list "transcribe" "--model" new "--input" "/t/a.wav")))))
+          (should-not (dictate--program t))
+          (should-error (dictate--model) :type 'user-error)
+          ;; Two releases unpacked side by side: the newest is used.
+          (let ((old (expand-file-name "nemo-speech-0.2.0-linux-x86_64-vulkan/bin/nemo-speech" dir))
+                (new (expand-file-name "nemo-speech-0.10.0-linux-x86_64-vulkan/bin/nemo-speech" dir))
+                (models (expand-file-name "models" dir)))
+            (dolist (exe (list old new))
+              (make-directory (file-name-directory exe) t)
+              (write-region "" nil exe)
+              (set-file-modes exe #o755))
+            ;; A folder with a similar name is not taken for the program.
+            (make-directory (expand-file-name "nemo-speech-0.10.0-linux-x86_64-vulkan/include/nemo-speech" dir) t)
+            (make-directory models)
+            (let ((m1 (expand-file-name "orukeet-v0.1.0-f16.gguf" models))
+                  (m2 (expand-file-name "orukeet-v0.2.0-f16.gguf" models)))
+              (write-region "" nil m1)
+              (set-file-times m1 (time-subtract nil 100))
+              (write-region "" nil m2)
+              (should (equal (dictate--program) new))
+              (should (equal (dictate--model) m2))
+              (let ((dictate-model m1))
+                (should (equal (dictate--model) m1))))))
       (delete-directory dir t))))
+
+(ert-deftest dictate-test-arguments ()
+  (let ((dictate-model "/m/orukeet.gguf")
+        (dictate-language "en")
+        (dictate-punctuation 'model)
+        (dictate-device nil)
+        (dictate-vocabulary nil)
+        (dictate-extra-args nil))
+    (should (equal (dictate--arguments "/t/a.wav")
+                   '("transcribe" "/t/a.wav" "--model" "/m/orukeet.gguf"
+                     "--no-warmup" "--language" "en")))
+    (let ((dictate-language nil)
+          (dictate-punctuation 'spoken)
+          (dictate-device "cpu")
+          (dictate-vocabulary '("troponin" "Takotsubo"))
+          (dictate-extra-args '("--threads" "4")))
+      (should (equal (dictate--arguments "/t/a.wav")
+                     '("transcribe" "/t/a.wav" "--model" "/m/orukeet.gguf"
+                       "--no-warmup" "--no-punctuation" "--device" "cpu"
+                       "--speech-context" "troponin"
+                       "--speech-context" "Takotsubo"
+                       "--threads" "4"))))))
 
 (ert-deftest dictate-test-mode-line ()
   (let ((global-mode-string nil) (dictate--recording nil) (dictate--jobs 0))
@@ -359,7 +465,7 @@ Source #80
   (let* ((phrases nil)
          (session (dictate--session-create :live t)))
     (cl-letf (((symbol-function 'dictate--enqueue)
-               (lambda (_s data) (push (/ (length data) 32000.0) phrases))))
+               (lambda (_s data &optional _gap) (push (/ (length data) 32000.0) phrases))))
       ;; Arrive in uneven chunks, as from a pipe.
       (let ((data (apply #'concat frames)) (i 0))
         (while (< i (length data))
@@ -368,6 +474,29 @@ Source #80
             (setq i j))))
       (dictate--end-phrase session))
     (nreverse phrases)))
+
+(ert-deftest dictate-test-gaps ()
+  ;; Each phrase is queued with the quiet before it; the first has none.
+  (let ((dictate-live-pause 0.7) (dictate-live-min-speech 0.3)
+        (dictate-live-max-phrase 25) (dictate-live-sensitivity 3.0)
+        (dictate-live-min-level 150)
+        (gaps nil)
+        (session (dictate--session-create :live t)))
+    (cl-letf (((symbol-function 'dictate--enqueue)
+               (lambda (_s _data &optional gap) (push gap gaps))))
+      (dolist (f (append (dictate-test--frames 40 1.0)
+                         (dictate-test--frames 3000 1.0)
+                         (dictate-test--frames 40 0.9)
+                         (dictate-test--frames 3000 1.0)
+                         (dictate-test--frames 40 2.5)
+                         (dictate-test--frames 3000 1.0)
+                         (dictate-test--frames 40 1.0)))
+        (dictate--frame session f)))
+    (setq gaps (nreverse gaps))
+    (should (= (length gaps) 3))
+    (should (null (car gaps)))
+    (should (< 0.85 (nth 1 gaps) 0.95))
+    (should (< 2.45 (nth 2 gaps) 2.55))))
 
 (ert-deftest dictate-test-frame-level ()
   (should (= (dictate--frame-level (car (dictate-test--frames 1000 0.02))) 1000))
@@ -459,10 +588,10 @@ Source #80
         (sent nil)
         (session (dictate--session-create :live t)))
     (cl-letf (((symbol-function 'dictate--enqueue)
-               (lambda (_s data) (push (/ (length data) 32000.0) sent)))
+               (lambda (_s data &optional _gap) (push (/ (length data) 32000.0) sent)))
               ((symbol-function 'dictate--next) #'ignore))
       (dolist (f (dictate-test--frames 3000 2)) (dictate--frame session f))
-      (dictate--recording-ended session nil))
+      (dictate--recording-ended session))
     (should (equal sent '(2.0)))))
 
 (ert-deftest dictate-test-long-phrase-is-cut ()
@@ -486,20 +615,21 @@ Source #80
       (accept-process-output nil 0.1))
     (funcall pred)))
 
-(defun dictate-test--fake-parakeet (dir text)
-  "Write a fake parakeet-cli in DIR that checks the WAV and prints TEXT.
+(defun dictate-test--fake-nemo (dir text)
+  "Write a fake nemo-speech in DIR that checks the WAV and prints TEXT.
 TEXT may hold several phrases separated by |; call N prints the Nth.
 Each call appends its arguments and the WAV length to DIR/calls."
-  (let ((f (expand-file-name "parakeet-cli" dir)))
+  (let ((f (expand-file-name "nemo-speech" dir)))
     (with-temp-file f
       (insert "#!/bin/sh\n"
               "dir=" (shell-quote-argument dir) "\n"
               "args=\"$*\"\n"
-              "while [ $# -gt 0 ]; do case \"$1\" in --input) wav=\"$2\"; shift;; esac; shift; done\n"
+              "[ \"$1\" = transcribe ] || exit 2\n"
+              "wav=\"$2\"\n"
               "len=$(ffprobe -v error -show_entries format=duration -of csv=p=0 \"$wav\") || exit 3\n"
               "n=$(( $(cat \"$dir/count\" 2>/dev/null || echo 0) + 1 )); echo $n > \"$dir/count\"\n"
               "echo \"$len $args\" >> \"$dir/calls\"\n"
-              "echo 'loading model' >&2\n"
+              "echo '[asr] model=orukeet head=tdt backend=Vulkan0' >&2\n"
               "sleep 0.3\n"
               "printf '%s\\n' " (shell-quote-argument text)
               " | cut -d'|' -f$n\n"))
@@ -507,7 +637,7 @@ Each call appends its arguments and the WAV length to DIR/calls."
     f))
 
 (defun dictate-test--calls (dir)
-  "Return the lines logged by the fake parakeet in DIR."
+  "Return the lines logged by the fake nemo-speech in DIR."
   (let ((f (expand-file-name "calls" dir)))
     (and (file-exists-p f)
          (split-string (with-temp-buffer (insert-file-contents f)
@@ -515,7 +645,7 @@ Each call appends its arguments and the WAV length to DIR/calls."
                        "\n" t))))
 
 (defmacro dictate-test--with-setup (text &rest body)
-  "Run BODY with ffmpeg reading the test WAV and a fake parakeet printing TEXT."
+  "Run BODY with ffmpeg reading the test WAV and a fake nemo-speech printing TEXT."
   (declare (indent 1))
   `(let* ((dir (make-temp-file "dictate-e2e" t))
           (wav (or (getenv "DICTATE_TEST_WAV")
@@ -524,16 +654,27 @@ Each call appends its arguments and the WAV length to DIR/calls."
                                    "-i" "sine=frequency=440:duration=8" w)
                      w)))
           (dictate-input-args (list "-re" "-i" wav))
-          (dictate-parakeet-program (or (getenv "DICTATE_TEST_PARAKEET")
-                                        (dictate-test--fake-parakeet dir ,text)))
-          (dictate-parakeet-model (or (getenv "DICTATE_TEST_MODEL")
+          (dictate-program (or (getenv "DICTATE_TEST_NEMO")
+                               (dictate-test--fake-nemo dir ,text)))
+          (dictate-model (or (getenv "DICTATE_TEST_MODEL")
                                       (let ((m (expand-file-name "test.gguf" dir)))
                                         (write-region "" nil m) m)))
           (dictate-keep-audio nil)
+          (dictate-vocabulary nil)
+          (dictate-extra-args nil)
           (dictate-live nil)
           (dictate--recording nil)
-          (dictate--jobs 0))
+          (dictate--jobs 0)
+          ;; Keep the user's corrections and recent phrases out of it.
+          (dictate-corrections nil)
+          (dictate-corrections-file (expand-file-name "corrections.eld" dir))
+          (dictate--file-corrections nil)
+          (dictate-text-functions nil)
+          (dictate-recent-phrases 20)
+          (dictate--phrases nil)
+          (dictate--audio-directory nil))
      (unwind-protect (progn ,@body)
+       (dictate--delete-audio)
        (delete-directory dir t))))
 
 (ert-deftest dictate-test-record-stop-insert ()
@@ -551,16 +692,17 @@ Each call appends its arguments and the WAV length to DIR/calls."
         (should (= (process-exit-status process) 0)))
       (should (dictate-test--wait (lambda () (> (buffer-size) 8)) 60))
       (should (dictate-test--wait (lambda () (= dictate--jobs 0)) 10))
-      (if (getenv "DICTATE_TEST_PARAKEET")
-          (message "Real parakeet wrote: %S" (buffer-string))
+      (if (getenv "DICTATE_TEST_NEMO")
+          (message "Real nemo-speech wrote: %S" (buffer-string))
         (should (equal (buffer-string) "Notes: The kidney filters blood."))))))
 
 (ert-deftest dictate-test-live-phrases ()
   ;; Two tone bursts with a pause between them, like two phrases.
   (skip-unless (executable-find "ffmpeg"))
-  (dictate-test--with-setup "The heart pumps.|blood to the lungs."
+  (dictate-test--with-setup "The heart pumps.|Blood to the lungs."
     (let ((dictate-live t)
           (dictate-live-pause 0.7)
+          (dictate-sentence-pause 1.5)
           (dictate-live-min-speech 0.3)
           (dictate-live-sensitivity 3.0)
           (dictate-live-min-level 150)
@@ -586,13 +728,14 @@ Each call appends its arguments and the WAV length to DIR/calls."
         (should (= (point) (point-max)))
         (should (= (length (dictate-test--calls dir)) 2))))))
 
-(ert-deftest dictate-test-parakeet-transcribe ()
-  ;; A fake parakeet-cli: logs on stderr, the text on stdout.
-  (let* ((dir (make-temp-file "dictate-parakeet" t))
-         (exe (expand-file-name "parakeet-cli" dir))
+(ert-deftest dictate-test-transcribe ()
+  ;; A fake nemo-speech: its log on stderr, the text on stdout.
+  (let* ((dir (make-temp-file "dictate-nemo" t))
+         (exe (expand-file-name "nemo-speech" dir))
          (wav (expand-file-name "a.wav" dir))
-         (dictate-parakeet-program exe)
-         (dictate-parakeet-model (expand-file-name "ctc.gguf" dir))
+         (dictate-program exe)
+         (dictate-model (expand-file-name "orukeet.gguf" dir))
+         (dictate-punctuation 'model)
          (dictate--jobs 0)
          (result 'none))
     (unwind-protect
@@ -600,14 +743,17 @@ Each call appends its arguments and the WAV length to DIR/calls."
           (with-temp-file exe
             (insert "#!/bin/sh\n"
                     "[ \"$1\" = transcribe ] || exit 2\n"
-                    "echo 'loading model on Vulkan' >&2\n"
-                    "echo 'so i said hello'\n"))
+                    "[ -f \"$2\" ] || exit 3\n"
+                    "echo '[asr] model=orukeet head=tdt backend=Vulkan0' >&2\n"
+                    "echo 'So I said hello to Dr. Müller.'\n"
+                    "echo '[nemo-speech] transcribe session finished' >&2\n"))
           (set-file-modes exe #o755)
           (write-region "" nil wav)
           (dictate--transcribe wav (lambda (text) (setq result text)))
           (should (dictate-test--wait (lambda () (not (eq result 'none))) 10))
-          (should (equal result "so I said hello"))
-          (should-not (file-exists-p wav))
+          (should (equal result "So I said hello to Dr. Müller."))
+          ;; The audio is left for the caller, to keep for replay.
+          (should (file-exists-p wav))
           ;; A failure gives nil.
           (with-temp-file exe (insert "#!/bin/sh\necho 'no GPU' >&2\nexit 1\n"))
           (write-region "" nil wav)
@@ -643,6 +789,202 @@ Each call appends its arguments and the WAV length to DIR/calls."
           (accept-process-output nil 0.2)
           (should (null dictate--recording))
           (should (= dictate--jobs 0)))))))
+
+;;;; Corrections, replay, transcribing again, languages
+
+(ert-deftest dictate-test-corrections ()
+  (let ((dictate-corrections '(("troponine" . "troponin")
+                               ("e c g" . "ECG")
+                               ("tug a" . "toggle")
+                               ("um" . "")))
+        (dictate-corrections-file "/nonexistent/corrections.eld")
+        (dictate--file-corrections nil))
+    ;; Whole words only, in any case; the capital follows what was heard,
+    ;; unless the correction has capitals of its own.
+    (should (equal (dictate--apply-corrections "Troponine and troponine, not troponines.")
+                   "Troponin and troponin, not troponines."))
+    (should (equal (dictate--apply-corrections "Order an E C G and an e-c-g.")
+                   "Order an ECG and an ECG."))
+    (should (equal (dictate--apply-corrections "Tug a the mode.") "Toggle the mode."))
+    ;; An acronym's capitals are not a sentence's.
+    (let ((dictate-corrections '(("ECG" . "electrocardiogram"))))
+      (should (equal (dictate--apply-corrections "An ECG. Ecg first.")
+                     "An electrocardiogram. Electrocardiogram first.")))
+    ;; A correction to nothing drops the word and its space.
+    (should (equal (dictate--apply-corrections "The um patient, um, is fine.")
+                   "The patient, , is fine."))
+    (should (equal (dictate--apply-corrections "Umbrella.") "Umbrella."))))
+
+(ert-deftest dictate-test-text-functions ()
+  (let ((dictate-corrections '(("troponine" . "troponin")))
+        (dictate-corrections-file "/nonexistent/corrections.eld")
+        (dictate--file-corrections nil)
+        (dictate-text-functions
+         (list (lambda (text) (concat text "!"))
+               (lambda (text) (unless (string-prefix-p "Ignore" text) text)))))
+    ;; Corrections come first, then the functions in order.
+    (should (equal (dictate--process-text "A troponine.") "A troponin.!"))
+    ;; A function returning nil drops the phrase.
+    (should (null (dictate--process-text "Ignore this.")))
+    (should (null (dictate--process-text nil)))
+    ;; Nothing heard stays nothing: the functions are not called.
+    (should (equal (dictate--process-text "") ""))))
+
+(ert-deftest dictate-test-correct-command ()
+  (let* ((dir (make-temp-file "dictate-corr" t))
+         (dictate-corrections nil)
+         (dictate-corrections-file (expand-file-name "sub/corrections.eld" dir))
+         (dictate--file-corrections nil))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "Start a Troponine drip.")
+          (goto-char 12)                ; inside "Troponine"
+          (dictate-correct "troponine" "heparin")
+          ;; Fixed here, with the capital it had.
+          (should (equal (buffer-string) "Start a Heparin drip."))
+          (should (file-exists-p dictate-corrections-file))
+          (should (equal (dictate--learned-corrections) '(("troponine" . "heparin"))))
+          ;; Correcting the same word again replaces the old correction.
+          (goto-char (point-max))
+          (dictate-correct "Troponine" "troponin")
+          (should (equal (buffer-string) "Start a Heparin drip."))
+          (should (equal (dictate--learned-corrections) '(("Troponine" . "troponin"))))
+          ;; And applies to what is dictated from now on.
+          (should (equal (dictate--process-text "check troponine levels")
+                         "check troponin levels"))
+          ;; A region works too, and an empty correction drops it.
+          (erase-buffer)
+          (insert "The um patient is fine.")
+          (set-mark 5) (goto-char 7) (activate-mark)
+          (let ((transient-mark-mode t))
+            (dictate-correct "um" ""))
+          (should (equal (buffer-string) "The patient is fine.")))
+      (delete-directory dir t))))
+
+(ert-deftest dictate-test-recent-phrases ()
+  (let* ((dictate-recent-phrases 2)
+         (dictate--phrases nil)
+         (dictate--audio-directory nil)
+         (wavs (cl-loop repeat 3 collect (make-temp-file "dt" nil ".wav"))))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "One. Two. Three.")
+          (cl-loop for wav in wavs
+                   for (s . e) in '((1 . 5) (6 . 10) (11 . 17))
+                   do (dictate--remember wav "en" (copy-marker s) (copy-marker e)))
+          ;; Only the last two are kept, in a private folder.
+          (should (= (length dictate--phrases) 2))
+          (should-not (file-exists-p (car wavs)))
+          (should (= (logand (file-modes dictate--audio-directory) #o077) 0))
+          (let ((kept (mapcar (lambda (p) (plist-get p :wav)) dictate--phrases)))
+            (should (seq-every-p #'file-exists-p kept))
+            (should (equal (mapcar #'file-name-directory kept)
+                           (make-list 2 (file-name-as-directory dictate--audio-directory)))))
+          ;; The phrase at point, or else the last one.
+          (goto-char 8)
+          (should (= (plist-get (dictate--phrase) :start) 6))
+          (goto-char 2)
+          (should (= (plist-get (dictate--phrase) :start) 11))
+          ;; Deleting the audio, as when Emacs exits.
+          (let ((folder dictate--audio-directory))
+            (dictate--delete-audio)
+            (should-not (file-exists-p folder))
+            (should-error (dictate--phrase-audio (dictate--phrase)) :type 'user-error)))
+      (dictate--delete-audio)))
+  ;; With none kept, the audio is deleted at once.
+  (let ((dictate-recent-phrases 0)
+        (dictate--phrases nil)
+        (wav (make-temp-file "dt" nil ".wav")))
+    (dictate--remember wav "en" nil nil)
+    (should-not (file-exists-p wav))
+    (should (null dictate--phrases))
+    (should-error (dictate--phrase) :type 'user-error)))
+
+(ert-deftest dictate-test-switch-language ()
+  (let ((dictate-language "en")
+        (dictate-languages '("en" "fr"))
+        (global-mode-string nil))
+    (dictate-switch-language)
+    (should (equal dictate-language "fr"))
+    (dictate-switch-language)
+    (should (equal dictate-language "en"))
+    (dictate-switch-language "auto")
+    (should (null dictate-language))
+    ;; From "detect", the cycle starts again.
+    (dictate-switch-language)
+    (should (equal dictate-language "en"))
+    (dictate-switch-language "de")
+    (should (equal dictate-language "de"))
+    (dictate-switch-language)
+    (should (equal dictate-language "en"))
+    ;; The mode line shows it while dictating.
+    (let ((dictate--recording (dictate--session-create :live t)))
+      (should (string-match-p "\\[en\\]" (dictate--mode-line-string)))
+      (let ((dictate-languages '("en")))
+        (should-not (string-match-p "\\[" (dictate--mode-line-string)))))))
+
+(ert-deftest dictate-test-replay-and-retranscribe ()
+  ;; Dictate two phrases, the second in French, then replay the one at
+  ;; point and transcribe it again with a correction learnt meanwhile.
+  (skip-unless (executable-find "ffmpeg"))
+  (dictate-test--with-setup "The heart pumps.|Blood to the lunges.|Blood to the lunges."
+    (let ((dictate-live t)
+          (dictate-live-pause 0.7)
+          (dictate-sentence-pause 1.5)
+          (dictate-live-min-speech 0.3)
+          (dictate-live-sensitivity 3.0)
+          (dictate-live-min-level 150)
+          (dictate-language "en")
+          (dictate-languages '("en" "fr"))
+          (played (expand-file-name "played" dir))
+          (player (expand-file-name "player" dir))
+          (wav (expand-file-name "phrases.wav" dir)))
+      (call-process "ffmpeg" nil nil nil "-v" "error" "-f" "lavfi" "-i"
+                    "aevalsrc=0.15*sin(2*PI*440*t)*(between(t\\,1\\,2.5)+between(t\\,3.7\\,5.2))+0.002*random(0):s=16000:d=7"
+                    wav)
+      (with-temp-file player
+        (insert "#!/bin/sh\nfor a; do f=\"$a\"; done\n"
+                "ffprobe -v error -show_entries format=duration -of csv=p=0 \"$f\" > "
+                (shell-quote-argument played) "\n"))
+      (set-file-modes player #o755)
+      (setq dictate-input-args (list "-re" "-i" wav))
+      (with-temp-buffer
+        (insert "Notes: ")
+        (dictate-toggle)
+        ;; Switch to French once the first phrase is typed.
+        (should (dictate-test--wait
+                 (lambda () (string-match-p "pumps" (buffer-string))) 6))
+        (dictate-switch-language)
+        (let ((process (dictate--session-process dictate--recording)))
+          (should (dictate-test--wait (lambda () (not (process-live-p process))) 10)))
+        (should (dictate-test--wait
+                 (lambda () (string-match-p "lunges" (buffer-string))) 10))
+        (should (dictate-test--wait (lambda () (= dictate--jobs 0)) 10))
+        (should (equal (buffer-string) "Notes: The heart pumps blood to the lunges."))
+        ;; Each phrase was transcribed in the language it was said in.
+        (let ((calls (dictate-test--calls dir)))
+          (should (string-match-p "--language en" (nth 0 calls)))
+          (should (string-match-p "--language fr" (nth 1 calls))))
+        (should (= (length dictate--phrases) 2))
+        ;; Replay the phrase at point.
+        (goto-char 35)                  ; in "lunges"
+        (let ((dictate-play-program player) (dictate-play-args nil))
+          (dictate-replay)
+          (should (dictate-test--wait (lambda () (file-exists-p played)) 5)))
+        (should (< 1.5 (string-to-number
+                        (with-temp-buffer (insert-file-contents played) (buffer-string)))
+                   7))
+        ;; Learn a correction, then transcribe the phrase again.
+        (let ((dictate-corrections '(("lunges" . "lungs"))))
+          (dictate-retranscribe)
+          (should (dictate-test--wait
+                   (lambda () (string-match-p "lungs\\." (buffer-string))) 10)))
+        (should (equal (buffer-string) "Notes: The heart pumps blood to the lungs."))
+        (should (string-match-p "--language fr" (nth 2 (dictate-test--calls dir))))
+        ;; The phrase's text is the new text, for the next replay or retry.
+        (let ((phrase (dictate--phrase-at 35)))
+          (should (equal (buffer-substring (plist-get phrase :start) (plist-get phrase :end))
+                         " blood to the lungs.")))))))
 
 (provide 'dictate-test)
 ;;; dictate-test.el ends here
